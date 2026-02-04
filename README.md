@@ -4,7 +4,7 @@ A secure video calling application that uses cryptographic authentication to pre
 
 ## What It Does
 
-SecureCall verifies caller identity using facial recognition combined with cryptographic signatures. When you make a call, the app:
+SecureCall verifies caller identity. When you make a call, the app:
 
 1. Uses a biometric factor or passkey to verify your face
 2. Proves your identity with a unique cryptographic signature
