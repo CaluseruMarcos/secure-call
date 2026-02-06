@@ -2,35 +2,54 @@
 
 import { useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import { useAuthActions } from "@convex-dev/auth/react";
 
 export default function Home() {
 	const [isLogin, setIsLogin] = useState(true);
 	const [isLoading, setIsLoading] = useState(false);
 	const [registrationStep, setRegistrationStep] = useState<"token" | "credentials">("token");
 	const [verifiedToken, setVerifiedToken] = useState("");
+	const [error, setError] = useState("");
+	
 	const router = useRouter();
+	const { signIn } = useAuthActions();
 
 	const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
 		setIsLoading(true);
+		setError("");
 
-		// If in registration mode and on token step, verify token first
-		if (!isLogin && registrationStep === "token") {
-			const formData = new FormData(e.currentTarget);
-			const token = formData.get("token") as string;
+		const formData = new FormData(e.currentTarget);
+		const email = formData.get("email") as string;
+		const password = formData.get("password") as string;
 
-			// Simulate token verification API call
-			setTimeout(() => {
-				setIsLoading(false);
-				setVerifiedToken(token);
-				setRegistrationStep("credentials");
-			}, 1000);
-		} else {
-			// Handle login or final registration
-			setTimeout(() => {
-				setIsLoading(false);
+		if (isLogin) {
+			// --- LOGIN LOGIK ---
+			try {
+				await signIn("password", { email, password, flow: "signIn" });
 				router.push("/dashboard");
-			}, 1000);
+			} catch (err) {
+				console.error("Login Error:", err);
+				setError("Ungültige E-Mail oder Passwort.");
+				setIsLoading(false);
+			}
+		} else {
+			// --- REGISTRIERUNGS LOGIK (wird von deinem Kollegen vervollständigt) ---
+			if (registrationStep === "token") {
+				const token = formData.get("token") as string;
+				// Simulierter Token-Check (hier könntest du SC-2026 prüfen)
+				setTimeout(() => {
+					setIsLoading(false);
+					setVerifiedToken(token);
+					setRegistrationStep("credentials");
+				}, 1000);
+			} else {
+				// Finaler Registrierungsschritt (Platzhalter für deinen Kollegen)
+				setTimeout(() => {
+					setIsLoading(false);
+					alert("Registrierung wird vom Kollegen implementiert (inkl. Krypto-Keys)!");
+				}, 1000);
+			}
 		}
 	};
 
@@ -38,6 +57,7 @@ export default function Home() {
 		setIsLogin(!isLogin);
 		setRegistrationStep("token");
 		setVerifiedToken("");
+		setError("");
 	};
 
 	return (
