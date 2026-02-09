@@ -1,7 +1,12 @@
 
 "use client";
 
-import { useRef, useState } from "react";
+import { api } from "@/convex/_generated/api";
+import { useQuery } from "convex/react";
+import { useRef, useState, useEffect } from "react";
+import { useAuthActions } from "@convex-dev/auth/react";
+import { useRouter } from "next/navigation";
+
 
 export default function VideoCallPage() {
 	const [isConnecting, setIsConnecting] = useState(false);
@@ -11,14 +16,18 @@ export default function VideoCallPage() {
 	const [connectionStatus, setConnectionStatus] = useState("Disconnected");
 	const [error, setError] = useState("");
 	const [isCaller, setIsCaller] = useState<boolean | null>(null);
-
+	const data = useQuery(api.users.currentUser);
+	const { signOut } = useAuthActions();
+	const router = useRouter();
+const allUsers = useQuery(api.users.getAllUsers);
+console.log("All Users: ", allUsers);
+	console.log("Current User Data:", data);
 
 	// Refs for video elements and WebRTC
 	const localVideoRef = useRef<HTMLVideoElement>(null);
 	const remoteVideoRef = useRef<HTMLVideoElement>(null);
 	const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
 	const localStreamRef = useRef<MediaStream | null>(null);
-
 
 	// TODO: Initialize local media stream
 	const initializeLocalStream = async () => {
@@ -130,6 +139,25 @@ export default function VideoCallPage() {
 		setConnectionStatus("Disconnected");
 	};
 
+	// Logout Handler
+	const handleLogout = async () => {
+		try {
+			// Cleanup: Stop all media tracks
+			if (localStreamRef.current) {
+				localStreamRef.current.getTracks().forEach(track => track.stop());
+			}
+			// Close peer connection
+			if (peerConnectionRef.current) {
+				peerConnectionRef.current.close();
+			}
+			// Logout und zurück zur Login-Seite
+			await signOut();
+			router.push("/");
+		} catch (err) {
+			console.error("Logout Error:", err);
+		}
+	};
+
 	return (
 		<div className="min-h-screen flex flex-col p-4 relative overflow-hidden">
 			{/* Subtle background pattern */}
@@ -149,8 +177,16 @@ export default function VideoCallPage() {
 								Status: <span className="font-medium text-foreground">{connectionStatus}</span>
 							</p>
 						</div>
-						<div className="flex items-center gap-3">
-							{!isConnected && !isConnecting && (
+						<div className="flex items-center gap-3">						{/* Logout Button */}
+						<button
+							onClick={handleLogout}
+							className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2 active:scale-[0.98]"
+						>
+							<svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+								<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+							</svg>
+							Logout
+						</button>							{!isConnected && !isConnecting && (
 								<>
 									<button
 										onClick={initiateCall}

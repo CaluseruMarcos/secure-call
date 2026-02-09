@@ -1,14 +1,15 @@
 "use client";
 
-import { useState, FormEvent } from "react";
+import { useState, FormEvent, use, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
+import { api } from "@/convex/_generated/api";
+import { useQuery } from "convex/react";
 
 export default function Home() {
 	const [isLogin, setIsLogin] = useState(true);
 	const [isLoading, setIsLoading] = useState(false);
-	const [registrationStep, setRegistrationStep] = useState<"token" | "credentials">("token");
-	const [verifiedToken, setVerifiedToken] = useState("");
+	const [showTokenInput, setShowTokenInput] = useState(false);
 	const [error, setError] = useState("");
 	
 	const router = useRouter();
@@ -27,39 +28,72 @@ export default function Home() {
 			// --- LOGIN LOGIK ---
 			try {
 				await signIn("password", { email, password, flow: "signIn" });
-				router.push("/dashboard");
+				router.push("/videoCall");
 			} catch (err) {
 				console.error("Login Error:", err);
 				setError("Ungültige E-Mail oder Passwort.");
 				setIsLoading(false);
 			}
 		} else {
-			// --- REGISTRIERUNGS LOGIK (wird von deinem Kollegen vervollständigt) ---
-			if (registrationStep === "token") {
+			// --- REGISTRIERUNGS LOGIK ---
+			if (showTokenInput) {
+				// Optional token verification (if user enters one)
 				const token = formData.get("token") as string;
-				// Simulierter Token-Check (hier könntest du SC-2026 prüfen)
-				setTimeout(() => {
+				if (token && token !== "SC-2026") {
+					setError("Invalid invitation token. You can leave it empty to register without one.");
 					setIsLoading(false);
-					setVerifiedToken(token);
-					setRegistrationStep("credentials");
-				}, 1000);
-			} else {
-				// Finaler Registrierungsschritt (Platzhalter für deinen Kollegen)
-				setTimeout(() => {
-					setIsLoading(false);
-					alert("Registrierung wird vom Kollegen implementiert (inkl. Krypto-Keys)!");
-				}, 1000);
+					return;
+				}
+				// Continue with registration even without token
+			}
+			
+			// Finaler Registrierungsschritt - Create account
+			const confirmPassword = formData.get("confirmPassword") as string;
+			
+			if (password !== confirmPassword) {
+				setError("Passwords do not match. Please try again.");
+				setIsLoading(false);
+				return;
+			}
+
+			try {
+				await signIn("password", { 
+					email, 
+					password, 
+					flow: "signUp" 
+				});
+				router.push("/videoCall");
+			} catch (err) {
+				console.error("Registration Error:", err);
+				setError("Registration failed. This email may already be registered.");
+				setIsLoading(false);
 			}
 		}
 	};
 
 	const handleModeSwitch = () => {
 		setIsLogin(!isLogin);
-		setRegistrationStep("token");
-		setVerifiedToken("");
+		setShowTokenInput(false);
 		setError("");
 	};
+	const data = useQuery(api.users.currentUser);
+const { signOut } = useAuthActions();
 
+useEffect(() => {
+	const checkUser = async () => {
+		
+		if(data){
+			
+			await signOut();
+		}
+		else{
+
+return;
+
+		}
+	};
+	checkUser();
+}, [])
 	return (
 		<div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
 			{/* Subtle background pattern */}
@@ -76,54 +110,29 @@ export default function Home() {
 					<div className="border-b border-border bg-muted/30 p-6">
 						<div className="flex items-center justify-between mb-2">
 							<h1 className="text-2xl font-semibold tracking-tight">
-								{isLogin ? "Welcome back" : registrationStep === "token" ? "Create account" : "Complete registration"}
+								{isLogin ? "Welcome back" : "Create account"}
 							</h1>
 							<div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
-								{registrationStep === "credentials" && !isLogin ? (
-									<svg
-										className="w-5 h-5 text-primary"
-										fill="none"
-										viewBox="0 0 24 24"
-										stroke="currentColor"
-									>
-										<path
-											strokeLinecap="round"
-											strokeLinejoin="round"
-											strokeWidth={2}
-											d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
-										/>
-									</svg>
-								) : (
-									<svg
-										className="w-5 h-5 text-primary"
-										fill="none"
-										viewBox="0 0 24 24"
-										stroke="currentColor"
-									>
-										<path
-											strokeLinecap="round"
-											strokeLinejoin="round"
-											strokeWidth={2}
-											d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
-										/>
-									</svg>
-								)}
+								<svg
+									className="w-5 h-5 text-primary"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+								>
+									<path
+										strokeLinecap="round"
+										strokeLinejoin="round"
+										strokeWidth={2}
+										d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+									/>
+								</svg>
 							</div>
 						</div>
 						<p className="text-sm text-muted-foreground">
 							{isLogin
 								? "Enter your credentials to access your account"
-								: registrationStep === "token"
-								? "Register with your invitation token"
 								: "Create your account credentials"}
 						</p>
-						{/* Progress indicator for registration */}
-						{!isLogin && (
-							<div className="flex items-center gap-2 mt-4">
-								<div className={`h-1.5 flex-1 rounded-full transition-all duration-500 ${registrationStep === "token" ? "bg-primary" : "bg-primary/30"}`} />
-								<div className={`h-1.5 flex-1 rounded-full transition-all duration-500 ${registrationStep === "credentials" ? "bg-primary" : "bg-muted"}`} />
-							</div>
-						)}
 					</div>
 
 					{/* Form */}
@@ -166,37 +175,26 @@ export default function Home() {
 									/>
 								</div>
 							</>
-						) : registrationStep === "token" ? (
+						) : (
 							<>
-								{/* Token field for registration - Step 1 */}
+								{/* Optional Token field for registration */}
 								<div className="space-y-2">
 									<label
 										htmlFor="token"
 										className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
 									>
-										Invitation Token
+										Invitation Token (Optional)
 									</label>
 									<input
 										id="token"
 										name="token"
 										type="text"
-										placeholder="Enter your invitation token"
-										required
+										placeholder="Enter your invitation token (optional)"
 										className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 transition-all font-mono"
-										autoFocus
 									/>
 								</div>
 								<div className="bg-muted/50 border border-border/50 rounded-md p-3 text-xs text-muted-foreground">
-									<p>Enter the invitation token you received to begin registration.</p>
-								</div>
-							</>
-						) : (
-							<>
-								{/* Credentials form for registration - Step 2 */}
-								<div className="bg-primary/5 border border-primary/20 rounded-md p-3 mb-4">
-									<p className="text-xs text-muted-foreground">
-										Token verified: <span className="font-mono text-primary">{verifiedToken}</span>
-									</p>
+									<p>Leave empty for standard registration, or enter a token if you have one.</p>
 								</div>
 
 								{/* Email field */}
@@ -286,43 +284,16 @@ export default function Home() {
 											d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
 										></path>
 									</svg>
-									{registrationStep === "token" && !isLogin ? "Verifying token..." : "Processing..."}
-								</>
-							) : isLogin ? (
-								"Sign in"
-							) : registrationStep === "token" ? (
-								"Verify token"
-							) : (
-								"Complete registration"
-							)}
+								"Processing..."
+							</>
+						) : isLogin ? (
+							"Sign in"
+						) : (
+							"Create account"
+						)}
 						</button>
 
-						{/* Back button for registration step 2 */}
-						{!isLogin && registrationStep === "credentials" && (
-							<button
-								type="button"
-								onClick={() => {
-									setRegistrationStep("token");
-									setVerifiedToken("");
-								}}
-								className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 border border-input bg-background hover:bg-accent hover:text-accent-foreground h-10 px-4 py-2 w-full"
-							>
-								<svg
-									className="w-4 h-4 mr-2"
-									fill="none"
-									viewBox="0 0 24 24"
-									stroke="currentColor"
-								>
-									<path
-										strokeLinecap="round"
-										strokeLinejoin="round"
-										strokeWidth={2}
-										d="M10 19l-7-7m0 0l7-7m-7 7h18"
-									/>
-								</svg>
-								Back to token verification
-							</button>
-						)}
+
 
 						{/* Toggle link */}
 						<div className="text-center pt-4 border-t border-border">
@@ -331,9 +302,9 @@ export default function Home() {
 								onClick={handleModeSwitch}
 								className="text-sm text-muted-foreground hover:text-primary transition-colors underline-offset-4 hover:underline"
 							>
-								{isLogin
-									? "Need an account? Register with token"
-									: "Already have an account? Sign in"}
+							{isLogin
+								? "Need an account? Register"
+								: "Already have an account? Sign in"}
 							</button>
 						</div>
 					</form>

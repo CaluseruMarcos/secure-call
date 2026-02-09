@@ -26,10 +26,18 @@ export const currentUser = query({
   args: {},
   handler: async (ctx) => {
     const userId = await auth.getUserId(ctx);
+    console.log("Current User ID:", userId);
     if (!userId) return null;
     return await ctx.db.get(userId);
   },
 });
+export const getAllUsers = query({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.db.query("users").collect();
+  },
+});
+
 
 // Weg 1: Public Key über E-Mail finden
 export const getPublicKeyByEmail = query({
