@@ -2,13 +2,16 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { useQuery } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 import { useRef, useState, useEffect } from "react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useRouter } from "next/navigation";
+import { Id } from "@/convex/_generated/dataModel";
 
 
 export default function VideoCallPage() {
+	const [callId, setCallId] = useState<string | null>(null);
+	const [calleeId, setCalleeId] = useState<string | null>(null);
 	const [isConnecting, setIsConnecting] = useState(false);
 	const [isConnected, setIsConnected] = useState(false);
 	const [isAudioMuted, setIsAudioMuted] = useState(false);
@@ -22,6 +25,7 @@ export default function VideoCallPage() {
 	const router = useRouter();
 	const allUsers = useQuery(api.users.getAllUsers);
 	const dropdownRef = useRef<HTMLDivElement>(null);
+	const createCall = useMutation(api.calls.createCall);
 
 	// Close dropdown when clicking outside
 	useEffect(() => {
@@ -34,10 +38,10 @@ export default function VideoCallPage() {
 		return () => document.removeEventListener("mousedown", handleClickOutside);
 	}, []);
 
-	const handleUserSelect = (userEmail: string | undefined) => {
+	const handleUserSelect = (userEmail: string | undefined, userId:string) => {
 		setShowUserDropdown(false);
 		if (userEmail) {
-			initiateCall(userEmail);
+			initiateCall(userId,userEmail);
 		}
 	};
 	console.log("Current User Data:", data);
@@ -86,7 +90,7 @@ export default function VideoCallPage() {
 
 
 	// Initiate a call (as caller)
-	const initiateCall = async (targetUserEmail?: string) => {
+	const initiateCall = async ( userId:string,targetUserEmail?: string) => {
 		setIsConnecting(true);
 		setIsCaller(true);
 		setError("");
@@ -102,6 +106,8 @@ export default function VideoCallPage() {
 				setIsConnected(true);
 				setConnectionStatus("Connected");
 				localVideoRef.current.srcObject = stream;
+				await createCall({ calleeUserId: userId as Id<"users"> });
+				
 			}
 		} catch (err) {
 			console.error("Error initiating call:", err);
@@ -228,7 +234,7 @@ export default function VideoCallPage() {
 														.map(user => (
 															<button
 																key={user._id}
-																onClick={() => handleUserSelect(user.email)}
+																onClick={() => handleUserSelect(user.email,user._id)}
 																className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0"
 															>
 																<div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">

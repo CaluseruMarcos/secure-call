@@ -19,5 +19,13 @@ export default defineSchema({
     challengerUserId: v.id("users"), // Wer prüft?
     status: v.string(),          // "pending" | "verified" | "failed"
   }),
+calls: defineTable({
+  callerId: v.id("users"),
+  calleeId: v.id("users"),
+  offer: v.optional(v.string()),      // JSON-stringified SDP offer
+  answer: v.optional(v.string()),     // JSON-stringified SDP answer
+  status: v.string(),                 // "pending", "connected", "ended"
+  createdAt: v.number(),
+})
 
 });
