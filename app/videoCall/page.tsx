@@ -16,11 +16,30 @@ export default function VideoCallPage() {
 	const [connectionStatus, setConnectionStatus] = useState("Disconnected");
 	const [error, setError] = useState("");
 	const [isCaller, setIsCaller] = useState<boolean | null>(null);
+	const [showUserDropdown, setShowUserDropdown] = useState(false);
 	const data = useQuery(api.users.currentUser);
 	const { signOut } = useAuthActions();
 	const router = useRouter();
-const allUsers = useQuery(api.users.getAllUsers);
-console.log("All Users: ", allUsers);
+	const allUsers = useQuery(api.users.getAllUsers);
+	const dropdownRef = useRef<HTMLDivElement>(null);
+
+	// Close dropdown when clicking outside
+	useEffect(() => {
+		const handleClickOutside = (event: MouseEvent) => {
+			if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+				setShowUserDropdown(false);
+			}
+		};
+		document.addEventListener("mousedown", handleClickOutside);
+		return () => document.removeEventListener("mousedown", handleClickOutside);
+	}, []);
+
+	const handleUserSelect = (userEmail: string | undefined) => {
+		setShowUserDropdown(false);
+		if (userEmail) {
+			initiateCall(userEmail);
+		}
+	};
 	console.log("Current User Data:", data);
 
 	// Refs for video elements and WebRTC
@@ -67,11 +86,11 @@ console.log("All Users: ", allUsers);
 
 
 	// Initiate a call (as caller)
-	const initiateCall = async () => {
+	const initiateCall = async (targetUserEmail?: string) => {
 		setIsConnecting(true);
 		setIsCaller(true);
 		setError("");
-		setConnectionStatus("Calling...");
+		setConnectionStatus(targetUserEmail ? `Calling ${targetUserEmail}...` : "Calling...");
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({
 				video: true,
@@ -168,7 +187,7 @@ console.log("All Users: ", allUsers);
 			<div className="absolute bottom-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: "12s", animationDelay: "2s" }} />
 
 			{/* Header */}
-			<div className="relative z-10 mb-6">
+			<div className="relative z-30 mb-6">
 				<div className="max-w-7xl mx-auto">
 					<div className="flex items-center justify-between">
 						<div>
@@ -188,15 +207,52 @@ console.log("All Users: ", allUsers);
 							Logout
 						</button>							{!isConnected && !isConnecting && (
 								<>
-									<button
-										onClick={initiateCall}
-										className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-6 py-2 active:scale-[0.98]"
-									>
-										<svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-										</svg>
-										Call
-									</button>
+									<div className="relative" ref={dropdownRef}>
+										<button
+											onClick={() => setShowUserDropdown(!showUserDropdown)}
+											className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-6 py-2 active:scale-[0.98]"
+										>
+											<svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+												<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+											</svg>
+											Call
+										</button>
+										{showUserDropdown && allUsers && (
+											<div className="absolute top-full right-0 mt-2 w-64 bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm z-[100]">
+												<div className="p-3 border-b border-border bg-muted/30">
+													<p className="text-sm font-medium">Select a user to call</p>
+												</div>
+												<div className="max-h-60 overflow-y-auto">
+													{allUsers
+														.filter(user => user._id !== data?._id)
+														.map(user => (
+															<button
+																key={user._id}
+																onClick={() => handleUserSelect(user.email)}
+																className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0"
+															>
+																<div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+																	<span className="text-xs font-medium text-primary">
+																		{user.email?.charAt(0).toUpperCase() || "U"}
+																	</span>
+																</div>
+																<div className="flex-1 min-w-0">
+																	<p className="text-sm font-medium truncate">{user.email}</p>
+																</div>
+																<svg className="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+																	<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+																</svg>
+															</button>
+														))}
+													{allUsers.filter(user => user._id !== data?._id).length === 0 && (
+														<div className="px-4 py-6 text-center">
+															<p className="text-sm text-muted-foreground">No other users available</p>
+														</div>
+													)}
+												</div>
+											</div>
+										)}
+									</div>
 									<button
 										onClick={respondToCall}
 										className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-green-600 text-white hover:bg-green-700 h-10 px-6 py-2 active:scale-[0.98]"
