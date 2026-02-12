@@ -28,5 +28,11 @@ calls: defineTable({
   status: v.string(),                 // "pending", "connected", "ended"
   createdAt: v.number(),
 }).index("by_callee", ["calleeId"]),
+iceCandidates: defineTable({
+  callId: v.id("calls"),
+  senderId: v.id("users"),      // Wer sendet den Kandidaten
+  candidate: v.string(),         // JSON-stringified ICE candidate
+  createdAt: v.number(),
+}).index("by_call", ["callId"])
 
 });

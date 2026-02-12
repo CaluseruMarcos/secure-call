@@ -107,3 +107,31 @@ export const getCallById = query({
     return call;
   },
 });
+
+export const addIceCandidate = mutation({
+  args: {
+    callId: v.id("calls"),
+    candidate: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const myUserId = await auth.getUserId(ctx);
+    if (!myUserId) throw new Error("Nicht eingeloggt");
+    
+    await ctx.db.insert("iceCandidates", {
+      callId: args.callId,
+      senderId: myUserId,
+      candidate: args.candidate,
+      createdAt: Date.now(),
+    });
+  },
+});
+export const getIceCandidates = query({
+  args: { callId: v.id("calls") },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("iceCandidates")
+      .withIndex("by_call", (q) => q.eq("callId", args.callId))
+      .order("asc")
+      .collect();
+  },
+});
