@@ -25,7 +25,7 @@ export default function Home() {
 		const password = formData.get("password") as string;
 
 		if (isLogin) {
-			// --- LOGIN LOGIK ---
+		
 			try {
 				await signIn("password", { email, password, flow: "signIn" });
 				router.push("/videoCall");

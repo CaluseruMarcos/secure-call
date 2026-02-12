@@ -26,6 +26,6 @@ calls: defineTable({
   answer: v.optional(v.string()),     // JSON-stringified SDP answer
   status: v.string(),                 // "pending", "connected", "ended"
   createdAt: v.number(),
-})
+}).index("by_callee", ["calleeId"]),
 
 });

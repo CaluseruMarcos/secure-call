@@ -20,12 +20,17 @@ export default function VideoCallPage() {
 	const [error, setError] = useState("");
 	const [isCaller, setIsCaller] = useState<boolean | null>(null);
 	const [showUserDropdown, setShowUserDropdown] = useState(false);
+	const [showIncomingCall, setShowIncomingCall] = useState(false);
+	const [incomingCallData, setIncomingCallData] = useState<any>(null);
 	const data = useQuery(api.users.currentUser);
 	const { signOut } = useAuthActions();
 	const router = useRouter();
 	const allUsers = useQuery(api.users.getAllUsers);
+	const incomingCall = useQuery(api.calls.checkIfCalled);
 	const dropdownRef = useRef<HTMLDivElement>(null);
 	const createCall = useMutation(api.calls.createCall);
+	const acceptCallMutation = useMutation(api.calls.acceptCall);
+	const rejectCallMutation = useMutation(api.calls.rejectCall);
 
 	// Close dropdown when clicking outside
 	useEffect(() => {
@@ -37,6 +42,41 @@ export default function VideoCallPage() {
 		document.addEventListener("mousedown", handleClickOutside);
 		return () => document.removeEventListener("mousedown", handleClickOutside);
 	}, []);
+
+	// Watch for incoming calls
+	useEffect(() => {
+		if (incomingCall && !isConnected && !isConnecting) {
+			setIncomingCallData(incomingCall);
+			setShowIncomingCall(true);
+		}
+	}, [incomingCall, isConnected, isConnecting]);
+
+	const handleAcceptCall = async () => {
+		if (incomingCallData) {
+			try {
+				await acceptCallMutation({ callId: incomingCallData._id });
+				setShowIncomingCall(false);
+				respondToCall();
+			} catch (err) {
+				console.error("Error accepting call:", err);
+			}
+		}
+	};
+
+	const handleRejectCall = async () => {
+		if (incomingCallData) {
+			try {
+				await rejectCallMutation({ callId: incomingCallData._id });
+				setShowIncomingCall(false);
+				setIncomingCallData(null);
+			} catch (err) {
+				console.error("Error rejecting call:", err);
+			}
+		}
+	};
+
+	// Get caller info
+	const callerInfo = incomingCallData && allUsers?.find(user => user._id === incomingCallData.callerId);
 
 	const handleUserSelect = (userEmail: string | undefined, userId:string) => {
 		setShowUserDropdown(false);
@@ -256,24 +296,60 @@ export default function VideoCallPage() {
 														</div>
 													)}
 												</div>
-											</div>
-										)}
 									</div>
-									<button
-										onClick={respondToCall}
-										className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-green-600 text-white hover:bg-green-700 h-10 px-6 py-2 active:scale-[0.98]"
-									>
-										<svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-											<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-										</svg>
-										Respond
-									</button>
-								</>
-							)}
-						</div>
+								)}
+							</div>
+						</>
+					)}
+				</div>
 					</div>
 				</div>
 			</div>
+
+			{/* Incoming Call Modal */}
+			{showIncomingCall && callerInfo && (
+				<div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
+					<div className="relative w-full max-w-md bg-card border border-border rounded-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-300">
+						{/* Header */}
+						<div className="border-b border-border bg-muted/30 p-6 text-center">
+							<div className="w-20 h-20 mx-auto rounded-full bg-primary/10 flex items-center justify-center mb-4 animate-pulse">
+								<span className="text-2xl font-bold text-primary">
+									{callerInfo.email?.charAt(0).toUpperCase() || "U"}
+								</span>
+							</div>
+							<h2 className="text-xl font-semibold tracking-tight mb-1">Incoming Call</h2>
+							<p className="text-muted-foreground text-sm">{callerInfo.email} is calling you...</p>
+						</div>
+
+						{/* Action Buttons */}
+						<div className="p-6 flex items-center justify-center gap-4">
+							<button
+								onClick={handleRejectCall}
+								className="inline-flex flex-col items-center justify-center gap-2"
+							>
+								<div className="w-14 h-14 rounded-full bg-destructive text-destructive-foreground hover:bg-destructive/90 flex items-center justify-center transition-all active:scale-95">
+									<svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 8l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2M5 3a2 2 0 00-2 2v1c0 8.284 6.716 15 15 15h1a2 2 0 002-2v-3.28a1 1 0 00-.684-.948l-4.493-1.498a1 1 0 00-1.21.502l-1.13 2.257a11.042 11.042 0 01-5.516-5.517l2.257-1.128a1 1 0 00.502-1.21L9.228 3.683A1 1 0 008.279 3H5z" />
+									</svg>
+								</div>
+								<span className="text-sm font-medium text-muted-foreground">Decline</span>
+							</button>
+
+							<button
+								onClick={handleAcceptCall}
+								className="inline-flex flex-col items-center justify-center gap-2"
+							>
+								<div className="w-14 h-14 rounded-full bg-green-600 text-white hover:bg-green-700 flex items-center justify-center transition-all active:scale-95 animate-pulse">
+									<svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+										<path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+									</svg>
+								</div>
+								<span className="text-sm font-medium">Accept</span>
+							</button>
+						</div>
+					</div>
+				</div>
+			)}
 
 			{/* Error message */}
 			{error && (
