@@ -7,6 +7,9 @@ import { useRef, useState, useEffect } from "react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useRouter } from "next/navigation";
 import { Id } from "@/convex/_generated/dataModel";
+import createSDPOffer, { sendSDPAnswer } from "../utils/webrtc";
+import sendSDPOffer from "../utils/webrtc";
+import { send } from "node:process";
 
 
 export default function VideoCallPage() {
@@ -31,7 +34,8 @@ export default function VideoCallPage() {
 	const createCall = useMutation(api.calls.createCall);
 	const acceptCallMutation = useMutation(api.calls.acceptCall);
 	const rejectCallMutation = useMutation(api.calls.rejectCall);
-
+	
+const updateCall = useMutation(api.calls.updateCall); // Hier holen wir die updateCall-Mutation, damit wir sie an die sendSDPOffer-Funktion übergeben können
 	// Close dropdown when clicking outside
 	useEffect(() => {
 		const handleClickOutside = (event: MouseEvent) => {
@@ -55,6 +59,10 @@ export default function VideoCallPage() {
 		if (incomingCallData) {
 			try {
 				await acceptCallMutation({ callId: incomingCallData._id });
+				console.log("Call accepted, call ID:", incomingCallData._id);
+				if (incomingCallData.offer) {
+					await sendSDPAnswer(incomingCallData._id, incomingCallData.offer, updateCall);
+				}
 				setShowIncomingCall(false);
 				respondToCall();
 			} catch (err) {
@@ -146,7 +154,19 @@ export default function VideoCallPage() {
 				setIsConnected(true);
 				setConnectionStatus("Connected");
 				localVideoRef.current.srcObject = stream;
-				await createCall({ calleeUserId: userId as Id<"users"> });
+				const call=await createCall({calleeUserId: userId as Id<"users">, });
+				setCallId(call.call); //call.call ist eine Id<"calls">, die wir später für die Signalisierung brauchen
+				
+				try{
+					
+					
+					await sendSDPOffer(call.call,updateCall); // Hier übergeben wir die updateCall-Mutation, damit die sendSDPOffer-Funktion die SDP-Offer in Convex speichern kann
+				
+				}
+				catch(err){
+					throw new Error("Failed to create/send SDP offer: " + err);
+				}
+				
 				
 			}
 		} catch (err) {

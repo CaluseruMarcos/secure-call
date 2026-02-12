@@ -20,6 +20,7 @@ export default defineSchema({
     status: v.string(),          // "pending" | "verified" | "failed"
   }),
 calls: defineTable({
+
   callerId: v.id("users"),
   calleeId: v.id("users"),
   offer: v.optional(v.string()),      // JSON-stringified SDP offer
