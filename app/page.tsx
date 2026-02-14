@@ -4,7 +4,8 @@ import { useState, FormEvent, use, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { api } from "@/convex/_generated/api";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
+import { createVault } from "@/app/utils/crypto";
 
 export default function Home() {
 	const [isLogin, setIsLogin] = useState(true);
@@ -14,6 +15,7 @@ export default function Home() {
 	
 	const router = useRouter();
 	const { signIn } = useAuthActions();
+	const storeVault = useMutation(api.users.storeVault);
 
 	const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
 		e.preventDefault();
@@ -57,11 +59,25 @@ export default function Home() {
 			}
 
 			try {
-				await signIn("password", { 
-					email, 
-					password, 
-					flow: "signUp" 
+				await signIn("password", {
+					email,
+					password,
+					flow: "signUp",
 				});
+				try {
+					const vault = await createVault(password);
+					await storeVault({
+						publicKey: vault.publicKey,
+						encryptedPrivateKey: vault.encryptedPrivateKey,
+						vaultSalt: vault.vaultSalt,
+						vaultIv: vault.vaultIv,
+					});
+				} catch (vaultErr) {
+					console.error("Vault Setup Error:", vaultErr);
+					setError("Vault setup failed. Please try again.");
+					setIsLoading(false);
+					return;
+				}
 				router.push("/videoCall");
 			} catch (err) {
 				console.error("Registration Error:", err);
