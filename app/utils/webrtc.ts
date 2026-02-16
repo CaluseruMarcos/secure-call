@@ -156,3 +156,35 @@ export function cleanupPeerConnection(pc: RTCPeerConnection | null, localStream:
     localStream.getTracks().forEach(track => track.stop());
   }
 }
+
+export function createDataChannel(pc: RTCPeerConnection, label: string): RTCDataChannel {
+
+  const dataChannel = pc.createDataChannel(label);
+
+  dataChannel.onopen = () => {
+    console.log('Data channel opened');
+  };
+
+
+  return dataChannel;
+}
+
+export function sendDataChannelMessage(dataChannel: RTCDataChannel, message: any): void {
+
+  if (dataChannel.readyState === 'open') {
+    dataChannel.send(JSON.stringify(message));
+    console.log('Data channel message sent:', message);
+  } else {
+    console.warn('Data channel is not open. Current state:', dataChannel.readyState);
+  }
+
+
+}
+
+export function closeDataChannel(dataChannel: RTCDataChannel): void {
+  if (dataChannel) {
+    dataChannel.close();
+    console.log('Data channel closed');
+  }
+  
+}
