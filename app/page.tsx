@@ -12,7 +12,8 @@ export default function Home() {
 	const [isLoading, setIsLoading] = useState(false);
 	const [showTokenInput, setShowTokenInput] = useState(false);
 	const [error, setError] = useState("");
-	
+	const [showBundIdRedirect, setShowBundIdRedirect] = useState(false);
+
 	const router = useRouter();
 	const { signIn } = useAuthActions();
 	const storeVault = useMutation(api.users.storeVault);
@@ -27,7 +28,7 @@ export default function Home() {
 		const password = formData.get("password") as string;
 
 		if (isLogin) {
-		
+
 			try {
 				await signIn("password", { email, password, flow: "signIn" });
 				router.push("/videoCall");
@@ -48,10 +49,10 @@ export default function Home() {
 				}
 				// Continue with registration even without token
 			}
-			
+
 			// Finaler Registrierungsschritt - Create account
 			const confirmPassword = formData.get("confirmPassword") as string;
-			
+
 			if (password !== confirmPassword) {
 				setError("Passwords do not match. Please try again.");
 				setIsLoading(false);
@@ -72,17 +73,27 @@ export default function Home() {
 						vaultSalt: vault.vaultSalt,
 						vaultIv: vault.vaultIv,
 					});
+
+					// Show BundID redirect screen
+					setShowBundIdRedirect(true);
+					setIsLoading(false);
+
+					// Redirect to videoCall after 10 seconds
+					setTimeout(() => {
+						router.push("/videoCall");
+					}, 10000);
 				} catch (vaultErr) {
 					console.error("Vault Setup Error:", vaultErr);
 					setError("Vault setup failed. Please try again.");
 					setIsLoading(false);
+					setShowBundIdRedirect(false);
 					return;
 				}
-				router.push("/videoCall");
 			} catch (err) {
 				console.error("Registration Error:", err);
 				setError("Registration failed. This email may already be registered.");
 				setIsLoading(false);
+				setShowBundIdRedirect(false);
 			}
 		}
 	};
@@ -93,28 +104,103 @@ export default function Home() {
 		setError("");
 	};
 	const data = useQuery(api.users.currentUser);
-const { signOut } = useAuthActions();
+	const { signOut } = useAuthActions();
 
-useEffect(() => {
-	const checkUser = async () => {
-		
-		if(data){
-			
-			await signOut();
-		}
-		else{
+	useEffect(() => {
+		const checkUser = async () => {
 
-return;
+			if (data) {
 
-		}
-	};
-	checkUser();
-}, [])
+				await signOut();
+			}
+			else {
+
+				return;
+
+			}
+		};
+		checkUser();
+	}, [])
+
+	// BundID Redirect Screen
+	if (showBundIdRedirect) {
+		return (
+			<div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
+				{/* Subtle background pattern */}
+				<div className="absolute inset-0 bg-[radial-gradient(hsl(var(--muted))_1px,transparent_1px)] [background-size:24px_24px] opacity-40" />
+
+				{/* Floating orbs for depth */}
+				<div className="absolute top-20 left-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: "8s" }} />
+				<div className="absolute bottom-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: "12s", animationDelay: "2s" }} />
+
+				<div className="w-full max-w-md relative z-10">
+					<div className="bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm p-12 transition-all duration-500">
+						<div className="flex flex-col items-center justify-center space-y-6">
+							{/* Icon */}
+							<div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center animate-pulse" style={{ animationDuration: "2s" }}>
+								<svg
+									className="w-8 h-8 text-primary"
+									fill="none"
+									viewBox="0 0 24 24"
+									stroke="currentColor"
+								>
+									<path
+										strokeLinecap="round"
+										strokeLinejoin="round"
+										strokeWidth={2}
+										d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
+									/>
+								</svg>
+							</div>
+
+							{/* Spinner */}
+							<svg
+								className="animate-spin h-12 w-12 text-primary"
+								xmlns="http://www.w3.org/2000/svg"
+								fill="none"
+								viewBox="0 0 24 24"
+							>
+								<circle
+									className="opacity-25"
+									cx="12"
+									cy="12"
+									r="10"
+									stroke="currentColor"
+									strokeWidth="4"
+								></circle>
+								<path
+									className="opacity-75"
+									fill="currentColor"
+									d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+								></path>
+							</svg>
+
+							{/* Text */}
+							<div className="text-center space-y-2">
+								<h2 className="text-xl font-semibold tracking-tight">
+									Weiterleitung zu BundID
+								</h2>
+								<p className="text-sm text-muted-foreground">
+									Bitte warten Sie...
+								</p>
+							</div>
+						</div>
+					</div>
+
+					{/* Footer note */}
+					<p className="text-center text-xs text-muted-foreground mt-6 animate-pulse" style={{ animationDuration: "3s" }}>
+						Sichere Authentifizierung wird durchgeführt
+					</p>
+				</div>
+			</div>
+		);
+	}
+
 	return (
 		<div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden">
 			{/* Subtle background pattern */}
 			<div className="absolute inset-0 bg-[radial-gradient(hsl(var(--muted))_1px,transparent_1px)] [background-size:24px_24px] opacity-40" />
-			
+
 			{/* Floating orbs for depth */}
 			<div className="absolute top-20 left-20 w-72 h-72 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: "8s" }} />
 			<div className="absolute bottom-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl animate-pulse" style={{ animationDuration: "12s", animationDelay: "2s" }} />
@@ -300,13 +386,13 @@ return;
 											d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
 										></path>
 									</svg>
-								"Processing..."
-							</>
-						) : isLogin ? (
-							"Sign in"
-						) : (
-							"Create account"
-						)}
+									"Processing..."
+								</>
+							) : isLogin ? (
+								"Sign in"
+							) : (
+								"Create account"
+							)}
 						</button>
 
 
@@ -318,9 +404,9 @@ return;
 								onClick={handleModeSwitch}
 								className="text-sm text-muted-foreground hover:text-primary transition-colors underline-offset-4 hover:underline"
 							>
-							{isLogin
-								? "Need an account? Register"
-								: "Already have an account? Sign in"}
+								{isLogin
+									? "Need an account? Register"
+									: "Already have an account? Sign in"}
 							</button>
 						</div>
 					</form>
