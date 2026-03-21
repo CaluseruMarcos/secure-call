@@ -1,19 +1,21 @@
 "use client";
 
 import { api } from "@/convex/_generated/api";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useConvex } from "convex/react";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { useAuthActions } from "@convex-dev/auth/react";
 import { useRouter } from "next/navigation";
 import { Id } from "@/convex/_generated/dataModel";
-import { 
-  createPeerConnection, 
-  sendSDPOffer, 
+import {
+  createPeerConnection,
+  sendSDPOffer,
   sendSDPAnswer,
   handleReceivedAnswer,
   addIceCandidateToPC,
   cleanupPeerConnection
 } from "../utils/webrtc";
+import { hasKeyPairForDevice } from "../utils/crypto";
+import { HandshakeManager, HandshakeResult, HandshakeStatus } from "../utils/handshake";
 
 export default function VideoCallPage() {
   const [callId, setCallId] = useState<Id<"calls"> | null>(null);
@@ -27,34 +29,140 @@ export default function VideoCallPage() {
   const [showUserDropdown, setShowUserDropdown] = useState(false);
   const [showIncomingCall, setShowIncomingCall] = useState(false);
   const [incomingCallData, setIncomingCallData] = useState<any>(null);
-  
+
+  // Crypto & Handshake State
+  const [deviceReady, setDeviceReady] = useState(false);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [handshakeStatus, setHandshakeStatus] = useState<HandshakeStatus>("idle");
+  const [verifiedPeer, setVerifiedPeer] = useState<{ name?: string; userId?: string } | null>(null);
+
   const data = useQuery(api.users.currentUser);
   const { signOut } = useAuthActions();
   const router = useRouter();
+  const convexClient = useConvex();
   const allUsers = useQuery(api.users.getAllUsers);
   const incomingCall = useQuery(api.calls.checkIfCalled);
   const callData = useQuery(
-    api.calls.getCallById, 
+    api.calls.getCallById,
     callId ? { callId } : "skip"
   );
   const iceCandidates = useQuery(
     api.calls.getIceCandidates,
     callId ? { callId } : "skip"
   );
-  
+
   const dropdownRef = useRef<HTMLDivElement>(null);
   const createCall = useMutation(api.calls.createCall);
   const updateCall = useMutation(api.calls.updateCall);
   const acceptCallMutation = useMutation(api.calls.acceptCall);
   const rejectCallMutation = useMutation(api.calls.rejectCall);
   const addIceCandidateMutation = useMutation(api.calls.addIceCandidate);
-  
-  // Refs for video elements and WebRTC
+
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const handshakeChannelRef = useRef<RTCDataChannel | null>(null);
+  const handshakeManagerRef = useRef<HandshakeManager | null>(null);
   const processedCandidatesRef = useRef<Set<string>>(new Set());
+
+  // ============================================================================
+  // Geräte-Kryptographie prüfen (Keys wurden bei Login/Register erstellt)
+  // ============================================================================
+
+  useEffect(() => {
+    if (!data?._id) return;
+
+    const checkDevice = async () => {
+      try {
+        const { exists, deviceId: devId } = await hasKeyPairForDevice(data._id);
+
+        if (!exists) {
+          // Kein Private Key für diesen User → ausloggen und zurück zum Login
+          console.warn("[Crypto] Kein Schlüsselpaar für diesen User gefunden");
+          await signOut();
+          router.push("/");
+          return;
+        }
+
+        setDeviceId(devId);
+        setDeviceReady(true);
+        console.log(`[Crypto] Gerät geladen: ${devId}`);
+      } catch (err) {
+        console.error("[Crypto] Geräte-Check fehlgeschlagen:", err);
+        setError("Kryptographie-Initialisierung fehlgeschlagen");
+      }
+    };
+
+    checkDevice();
+  }, [data?._id]);
+
+  // ============================================================================
+  // Handshake starten wenn DataChannel bereit ist
+  // ============================================================================
+
+  const startHandshakeOnChannel = useCallback(
+    (channel: RTCDataChannel, callerRole: boolean) => {
+      if (!data?._id || !deviceId) return;
+
+      handshakeChannelRef.current = channel;
+
+      // Public Key Lookup via Convex
+      const fetchPublicKey = async (
+        userId: string,
+        peerDeviceId: string
+      ): Promise<string | null> => {
+        const result = await convexClient.query(
+          api.devices.getPublicKeyForDevice,
+          {
+            userId: userId as Id<"users">,
+            deviceId: peerDeviceId,
+          }
+        );
+        return result?.publicKey ?? null;
+      };
+
+      // Username Lookup
+      const fetchUserName = async (
+        userId: string
+      ): Promise<string | null> => {
+        const user = await convexClient.query(api.users.getUserById, {
+          userId: userId as Id<"users">,
+        });
+        return user?.name ?? user?.email ?? null;
+      };
+
+      const manager = new HandshakeManager({
+        dataChannel: channel,
+        myUserId: data._id,
+        myDeviceId: deviceId,
+        fetchPublicKey,
+        fetchUserName,
+        onStatusChange: (result: HandshakeResult) => {
+          setHandshakeStatus(result.status);
+
+          if (result.status === "verified") {
+            setVerifiedPeer({
+              name: result.peerName,
+              userId: result.peerUserId,
+            });
+          }
+
+          if (result.status === "failed") {
+            setError(`Handshake fehlgeschlagen: ${result.error}`);
+          }
+        },
+      });
+
+      handshakeManagerRef.current = manager;
+
+      // Caller startet den Handshake
+      if (callerRole) {
+        manager.startHandshake();
+      }
+    },
+    [data?._id, deviceId, convexClient]
+  );
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -87,19 +195,14 @@ export default function VideoCallPage() {
   // Process ICE candidates
   useEffect(() => {
     if (!iceCandidates || !peerConnectionRef.current || !data) return;
-    
+
     const pc = peerConnectionRef.current;
     const myUserId = data._id;
-    
+
     iceCandidates.forEach((candidateData) => {
-      // Nur Kandidaten vom anderen Peer verarbeiten
       if (candidateData.senderId === myUserId) return;
-      
-      // Deduplizierung
       if (processedCandidatesRef.current.has(candidateData._id)) return;
       processedCandidatesRef.current.add(candidateData._id);
-      
-      // Kandidat hinzufügen
       addIceCandidateToPC(pc, candidateData.candidate);
     });
   }, [iceCandidates, data]);
@@ -107,9 +210,8 @@ export default function VideoCallPage() {
   // Handle incoming call answer (for caller)
   useEffect(() => {
     if (!callData || !isCaller || !peerConnectionRef.current) return;
-    
+
     if (callData.answer && peerConnectionRef.current.signalingState === 'have-local-offer') {
-      console.log('Received answer, setting remote description');
       handleReceivedAnswer(peerConnectionRef.current, callData.answer)
         .then(() => {
           setConnectionStatus("Connected (answer received)");
@@ -120,38 +222,41 @@ export default function VideoCallPage() {
     }
   }, [callData, isCaller]);
 
+  // ============================================================================
+  // Call-Handling (mit Handshake-Integration)
+  // ============================================================================
+
   const handleAcceptCall = async () => {
-    if (!incomingCallData || !data) return;
-    
+    if (!incomingCallData || !data || !deviceReady) return;
+
     try {
       setShowIncomingCall(false);
       setIsConnecting(true);
       setIsCaller(false);
       setCallId(incomingCallData._id);
       setConnectionStatus("Accepting call...");
-      
-      // Get local stream
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
       localStreamRef.current = stream;
-      
+
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      
-      // Create peer connection
+
       const pc = createPeerConnection(
         incomingCallData._id,
         addIceCandidateMutation,
-        handleRemoteStream
+        handleRemoteStream,
+        (channel) => startHandshakeOnChannel(channel, false), // Callee: wartet auf Challenge
+        false // isCaller = false
       );
       peerConnectionRef.current = pc;
-      
-      // Accept call and send answer
+
       await acceptCallMutation({ callId: incomingCallData._id });
-      
+
       if (incomingCallData.offer) {
         await sendSDPAnswer(
           incomingCallData._id,
@@ -173,7 +278,7 @@ export default function VideoCallPage() {
 
   const handleRejectCall = async () => {
     if (!incomingCallData) return;
-    
+
     try {
       await rejectCallMutation({ callId: incomingCallData._id });
       setShowIncomingCall(false);
@@ -183,7 +288,6 @@ export default function VideoCallPage() {
     }
   };
 
-  // Get caller info
   const callerInfo = incomingCallData && allUsers?.find(user => user._id === incomingCallData.callerId);
 
   const handleUserSelect = async (userEmail: string | undefined, userId: string) => {
@@ -193,45 +297,42 @@ export default function VideoCallPage() {
     }
   };
 
-  // Initiate a call (as caller)
   const initiateCall = async (userId: string, targetUserEmail?: string) => {
-    if (!data) return;
-    
+    if (!data || !deviceReady) return;
+
     setIsConnecting(true);
     setIsCaller(true);
     setError("");
     setConnectionStatus(targetUserEmail ? `Calling ${targetUserEmail}...` : "Calling...");
-    
+
     try {
-      // Get local stream
       const stream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true
       });
       localStreamRef.current = stream;
-      
+
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      
-      // Create call in database
+
       const call = await createCall({ calleeUserId: userId as Id<"users"> });
       setCallId(call.call);
-      
-      // Create peer connection
+
       const pc = createPeerConnection(
         call.call,
         addIceCandidateMutation,
-        handleRemoteStream
+        handleRemoteStream,
+        (channel) => startHandshakeOnChannel(channel, true), // Caller: startet Handshake
+        true // isCaller = true
       );
       peerConnectionRef.current = pc;
-      
-      // Send SDP offer
+
       await sendSDPOffer(call.call, pc, stream, updateCall);
-      
+
       setIsConnected(true);
       setConnectionStatus("Connected (offer sent, waiting for answer)");
-      
+
     } catch (err) {
       console.error("Error initiating call:", err);
       setError("Failed to initiate call");
@@ -241,17 +342,27 @@ export default function VideoCallPage() {
   };
 
   const cleanup = () => {
-    cleanupPeerConnection(peerConnectionRef.current, localStreamRef.current);
+    if (handshakeManagerRef.current) {
+      handshakeManagerRef.current.destroy();
+      handshakeManagerRef.current = null;
+    }
+    cleanupPeerConnection(
+      peerConnectionRef.current,
+      localStreamRef.current,
+      handshakeChannelRef.current
+    );
     peerConnectionRef.current = null;
     localStreamRef.current = null;
+    handshakeChannelRef.current = null;
     processedCandidatesRef.current.clear();
     setCallId(null);
     setIsConnected(false);
     setIsConnecting(false);
     setIsCaller(null);
+    setHandshakeStatus("idle");
+    setVerifiedPeer(null);
   };
 
-  // Toggle audio mute
   const toggleAudio = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getAudioTracks().forEach(track => {
@@ -261,7 +372,6 @@ export default function VideoCallPage() {
     }
   };
 
-  // Toggle video
   const toggleVideo = () => {
     if (localStreamRef.current) {
       localStreamRef.current.getVideoTracks().forEach(track => {
@@ -271,7 +381,6 @@ export default function VideoCallPage() {
     }
   };
 
-  // End call
   const endCall = async () => {
     if (callId) {
       try {
@@ -284,7 +393,6 @@ export default function VideoCallPage() {
     setConnectionStatus("Disconnected");
   };
 
-  // Logout Handler
   const handleLogout = async () => {
     cleanup();
     try {
@@ -293,6 +401,59 @@ export default function VideoCallPage() {
     } catch (err) {
       console.error("Logout Error:", err);
     }
+  };
+
+  // ============================================================================
+  // Handshake Status UI Helper
+  // ============================================================================
+
+  const renderVerificationBadge = () => {
+    if (handshakeStatus === "verified" && verifiedPeer) {
+      return (
+        <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-lg px-3 py-2">
+          <svg className="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+          </svg>
+          <div>
+            <p className="text-sm font-medium text-green-500">Verifiziert</p>
+            <p className="text-xs text-green-500/70">
+              {verifiedPeer.name ?? verifiedPeer.userId}
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    if (handshakeStatus === "failed") {
+      return (
+        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
+          <svg className="w-5 h-5 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+          <div>
+            <p className="text-sm font-medium text-destructive">Nicht verifiziert</p>
+            <p className="text-xs text-destructive/70">Identität konnte nicht bestätigt werden</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (
+      handshakeStatus === "waiting" ||
+      handshakeStatus === "responding" ||
+      handshakeStatus === "verifying"
+    ) {
+      return (
+        <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
+          <svg className="w-5 h-5 text-yellow-500 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          <p className="text-sm font-medium text-yellow-500">Verifiziere...</p>
+        </div>
+      );
+    }
+
+    return null;
   };
 
   return (
@@ -310,11 +471,23 @@ export default function VideoCallPage() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-3xl font-bold tracking-tight mb-2">Secure Video Call</h1>
-              <p className="text-sm text-muted-foreground">
-                Status: <span className="font-medium text-foreground">{connectionStatus}</span>
-              </p>
+              <div className="flex items-center gap-3">
+                <p className="text-sm text-muted-foreground">
+                  Status: <span className="font-medium text-foreground">{connectionStatus}</span>
+                </p>
+                {/* Geräte-Status */}
+                {deviceReady && (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
+                    <span className="w-1.5 h-1.5 bg-green-500 rounded-full" />
+                    Gerät registriert
+                  </span>
+                )}
+              </div>
             </div>
             <div className="flex items-center gap-3">
+              {/* Verification Badge */}
+              {isConnected && renderVerificationBadge()}
+
               {/* Logout Button */}
               <button
                 onClick={handleLogout}
@@ -326,54 +499,53 @@ export default function VideoCallPage() {
                 Logout
               </button>
               {!isConnected && !isConnecting && (
-                <>
-                  <div className="relative" ref={dropdownRef}>
-                    <button
-                      onClick={() => setShowUserDropdown(!showUserDropdown)}
-                      className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-6 py-2 active:scale-[0.98]"
-                    >
-                      <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                      </svg>
-                      Call
-                    </button>
-                    {showUserDropdown && allUsers && (
-                      <div className="absolute top-full right-0 mt-2 w-64 bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm z-[100]">
-                        <div className="p-3 border-b border-border bg-muted/30">
-                          <p className="text-sm font-medium">Select a user to call</p>
-                        </div>
-                        <div className="max-h-60 overflow-y-auto">
-                          {allUsers
-                            .filter(user => user._id !== data?._id)
-                            .map(user => (
-                              <button
-                                key={user._id}
-                                onClick={() => handleUserSelect(user.email, user._id)}
-                                className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0"
-                              >
-                                <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                                  <span className="text-xs font-medium text-primary">
-                                    {user.email?.charAt(0).toUpperCase() || "U"}
-                                  </span>
-                                </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-sm font-medium truncate">{user.email}</p>
-                                </div>
-                                <svg className="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
-                                </svg>
-                              </button>
-                            ))}
-                          {allUsers.filter(user => user._id !== data?._id).length === 0 && (
-                            <div className="px-4 py-6 text-center">
-                              <p className="text-sm text-muted-foreground">No other users available</p>
-                            </div>
-                          )}
-                        </div>
+                <div className="relative" ref={dropdownRef}>
+                  <button
+                    onClick={() => setShowUserDropdown(!showUserDropdown)}
+                    disabled={!deviceReady}
+                    className="inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 bg-primary text-primary-foreground hover:bg-primary/90 h-10 px-6 py-2 active:scale-[0.98] disabled:opacity-50 disabled:pointer-events-none"
+                  >
+                    <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                    </svg>
+                    {deviceReady ? "Call" : "Initialisiere..."}
+                  </button>
+                  {showUserDropdown && allUsers && (
+                    <div className="absolute top-full right-0 mt-2 w-64 bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm z-[100]">
+                      <div className="p-3 border-b border-border bg-muted/30">
+                        <p className="text-sm font-medium">Select a user to call</p>
                       </div>
-                    )}
-                  </div>
-                </>
+                      <div className="max-h-60 overflow-y-auto">
+                        {allUsers
+                          .filter(user => user._id !== data?._id)
+                          .map(user => (
+                            <button
+                              key={user._id}
+                              onClick={() => handleUserSelect(user.email, user._id)}
+                              className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/50 transition-colors border-b border-border/50 last:border-0"
+                            >
+                              <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
+                                <span className="text-xs font-medium text-primary">
+                                  {user.email?.charAt(0).toUpperCase() || "U"}
+                                </span>
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium truncate">{user.email}</p>
+                              </div>
+                              <svg className="w-4 h-4 text-muted-foreground flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+                              </svg>
+                            </button>
+                          ))}
+                        {allUsers.filter(user => user._id !== data?._id).length === 0 && (
+                          <div className="px-4 py-6 text-center">
+                            <p className="text-sm text-muted-foreground">No other users available</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -384,7 +556,6 @@ export default function VideoCallPage() {
       {showIncomingCall && callerInfo && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-background/80 backdrop-blur-sm">
           <div className="relative w-full max-w-md bg-card border border-border rounded-lg shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-300">
-            {/* Header */}
             <div className="border-b border-border bg-muted/30 p-6 text-center">
               <div className="w-20 h-20 mx-auto rounded-full bg-primary/10 flex items-center justify-center mb-4 animate-pulse">
                 <span className="text-2xl font-bold text-primary">
@@ -395,7 +566,6 @@ export default function VideoCallPage() {
               <p className="text-muted-foreground text-sm">{callerInfo.email} is calling you...</p>
             </div>
 
-            {/* Action Buttons */}
             <div className="p-6 flex items-center justify-center gap-4">
               <button
                 onClick={handleRejectCall}
@@ -411,6 +581,7 @@ export default function VideoCallPage() {
 
               <button
                 onClick={handleAcceptCall}
+                disabled={!deviceReady}
                 className="inline-flex flex-col items-center justify-center gap-2"
               >
                 <div className="w-14 h-14 rounded-full bg-green-600 text-white hover:bg-green-700 flex items-center justify-center transition-all active:scale-95 animate-pulse">
@@ -462,8 +633,28 @@ export default function VideoCallPage() {
 
           {/* Remote video */}
           <div className="relative bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm transition-all duration-500 hover:shadow-[0_20px_70px_-15px_rgba(0,0,0,0.3)]">
-            <div className="absolute top-4 left-4 z-10 bg-background/80 backdrop-blur-sm px-3 py-1.5 rounded-md border border-border">
-              <p className="text-xs font-medium">Remote Peer</p>
+            {/* Remote Peer Label mit Verifikations-Status */}
+            <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
+              <div className="bg-background/80 backdrop-blur-sm px-3 py-1.5 rounded-md border border-border">
+                <p className="text-xs font-medium">
+                  {verifiedPeer?.name ?? "Remote Peer"}
+                </p>
+              </div>
+              {/* Inline Verification Icon */}
+              {handshakeStatus === "verified" && (
+                <div className="bg-green-500/20 backdrop-blur-sm p-1.5 rounded-md border border-green-500/30">
+                  <svg className="w-4 h-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+              )}
+              {handshakeStatus === "failed" && (
+                <div className="bg-destructive/20 backdrop-blur-sm p-1.5 rounded-md border border-destructive/30">
+                  <svg className="w-4 h-4 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </div>
+              )}
             </div>
             <video
               ref={remoteVideoRef}
@@ -547,7 +738,7 @@ export default function VideoCallPage() {
           {/* Debug info */}
           <div className="mt-4 pt-4 border-t border-border">
             <p className="text-xs text-muted-foreground text-center">
-              WebRTC with ICE • Call ID: {callId || "None"} • Candidates: {processedCandidatesRef.current.size}
+              WebRTC with ICE &bull; Call ID: {callId || "None"} &bull; Candidates: {processedCandidatesRef.current.size} &bull; Handshake: {handshakeStatus} &bull; Device: {deviceId?.slice(0, 8) ?? "..."}
             </p>
           </div>
         </div>
@@ -555,7 +746,7 @@ export default function VideoCallPage() {
 
       {/* Footer note */}
       <p className="relative z-10 text-center text-xs text-muted-foreground mt-6 animate-pulse" style={{ animationDuration: "3s" }}>
-        End-to-end encrypted video communication
+        End-to-end verified communication with ECDSA P-256
       </p>
     </div>
   );

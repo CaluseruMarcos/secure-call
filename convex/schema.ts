@@ -3,36 +3,37 @@ import { authTables } from "@convex-dev/auth/server";
 import { v } from "convex/values";
 
 export default defineSchema({
-  ...authTables, // Erstellt automatisch alle Tabellen, die Auth braucht
+  ...authTables,
+
   users: defineTable({
     name: v.optional(v.string()),
     email: v.optional(v.string()),
-    publicKey: v.optional(v.string()),
-    encryptedPrivateKey: v.optional(v.string()), // AES-GCM verschlüsselter RSA Private Key
-    vaultSalt: v.optional(v.string()),           // Salt für PBKDF2 (Passwort-Ableitung)
-    vaultIv: v.optional(v.string()),             // Initialisierungsvektor für AES-GCM
   }).index("by_email", ["email"]),
 
-  challenges: defineTable({
-    nonce: v.string(),           // Die Zufallszahl (Challenge)
-    targetUserId: v.id("users"), // Wer soll geprüft werden?
-    challengerUserId: v.id("users"), // Wer prüft?
-    status: v.string(),          // "pending" | "verified" | "failed"
-  }),
-calls: defineTable({
+  // Jeder Nutzer kann mehrere Geräte haben, jedes mit eigenem Public Key
+  devices: defineTable({
+    userId: v.id("users"),
+    deviceId: v.string(), // UUID aus localStorage
+    publicKey: v.string(), // JWK-exportierter ECDSA Public Key
+    deviceName: v.optional(v.string()), // z.B. "Chrome auf Windows"
+    createdAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_device", ["userId", "deviceId"]),
 
-  callerId: v.id("users"),
-  calleeId: v.id("users"),
-  offer: v.optional(v.string()),      // JSON-stringified SDP offer
-  answer: v.optional(v.string()),     // JSON-stringified SDP answer
-  status: v.string(),                 // "pending", "connected", "ended"
-  createdAt: v.number(),
-}).index("by_callee", ["calleeId"]),
-iceCandidates: defineTable({
-  callId: v.id("calls"),
-  senderId: v.id("users"),      // Wer sendet den Kandidaten
-  candidate: v.string(),         // JSON-stringified ICE candidate
-  createdAt: v.number(),
-}).index("by_call", ["callId"])
+  calls: defineTable({
+    callerId: v.id("users"),
+    calleeId: v.id("users"),
+    offer: v.optional(v.string()),
+    answer: v.optional(v.string()),
+    status: v.string(), // "pending" | "accepted" | "connected" | "ended" | "rejected"
+    createdAt: v.number(),
+  }).index("by_callee", ["calleeId"]),
 
+  iceCandidates: defineTable({
+    callId: v.id("calls"),
+    senderId: v.id("users"),
+    candidate: v.string(),
+    createdAt: v.number(),
+  }).index("by_call", ["callId"]),
 });

@@ -10,7 +10,8 @@
 
 import type * as auth from "../auth.js";
 import type * as calls from "../calls.js";
-import type * as challange from "../challange.js";
+import type * as devices from "../devices.js";
+import type * as devtest from "../devtest.js";
 import type * as http from "../http.js";
 import type * as users from "../users.js";
 
@@ -23,7 +24,8 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   calls: typeof calls;
-  challange: typeof challange;
+  devices: typeof devices;
+  devtest: typeof devtest;
   http: typeof http;
   users: typeof users;
 }>;
