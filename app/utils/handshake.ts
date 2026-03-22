@@ -11,6 +11,10 @@ import {
   buildChallengePayload,
   arrayBufferToBase64,
   base64ToArrayBuffer,
+  generateECDHKeyPair,
+  exportECDHPublicKey,
+  importECDHPublicKey,
+  deriveHMACKey,
 } from "./crypto";
 
 // ============================================================================
@@ -33,6 +37,8 @@ export interface HandshakeResult {
   peerName?: string;
   error?: string;
   heartbeatCount?: number;
+  hmacKey?: CryptoKey;
+  audioSigningEnabled?: boolean; // true nur wenn BEIDE Seiten es unterstuetzen
 }
 
 // DataChannel Nachrichten-Typen
@@ -42,6 +48,8 @@ interface ChallengeMessage {
   userId: string;
   deviceId: string;
   timestamp: number;
+  ecdhPublicKey: string;
+  supportsAudioSigning: boolean; // Browser unterstuetzt Insertable Streams?
 }
 
 interface ChallengeResponseMessage {
@@ -51,6 +59,8 @@ interface ChallengeResponseMessage {
   userId: string;
   deviceId: string;
   timestamp: number;
+  ecdhPublicKey: string;
+  supportsAudioSigning: boolean;
 }
 
 interface ResponseMessage {
@@ -112,6 +122,15 @@ export class HandshakeManager {
   private peerVerifiedMe: boolean = false; // Hat der Peer mich verifiziert? (kein Error von ihm)
   private hadFailure: boolean = false; // Gab es jemals einen Fehlschlag?
 
+  // ECDH fuer Audio-Signierung
+  private myECDHKeyPair: CryptoKeyPair | null = null;
+  private peerECDHPublicKey: CryptoKey | null = null;
+  private hmacKey: CryptoKey | null = null;
+
+  // Audio-Signing Kompatibilitaet — nur wenn BEIDE Seiten es unterstuetzen
+  private iSupportAudioSigning: boolean = false;
+  private peerSupportsAudioSigning: boolean = false;
+
   // Challenge Timeout
   private static CHALLENGE_TIMEOUT_MS = 30_000;
 
@@ -133,6 +152,20 @@ export class HandshakeManager {
     this.dataChannel.onmessage = (event) => {
       this.handleMessage(event.data);
     };
+
+    // Pruefen ob dieser Browser Insertable Streams unterstuetzt
+    this.iSupportAudioSigning = this.detectInsertableStreamsSupport();
+  }
+
+  /**
+   * Prueft ob der Browser RTCRtpScriptTransform unterstuetzt.
+   */
+  private detectInsertableStreamsSupport(): boolean {
+    try {
+      return typeof RTCRtpScriptTransform !== "undefined";
+    } catch {
+      return false;
+    }
   }
 
   // ============================================================================
@@ -165,6 +198,12 @@ export class HandshakeManager {
       this.myChallenge = generateChallenge();
       this.myChallengeTimestamp = Date.now();
 
+      // Neues ECDH-Keypair fuer diesen Handshake (wird bei jedem Heartbeat rotiert)
+      this.myECDHKeyPair = await generateECDHKeyPair();
+      const ecdhPubJwk = await exportECDHPublicKey(
+        this.myECDHKeyPair.publicKey,
+      );
+
       if (
         this.status !== "verified" &&
         this.status !== "warning" &&
@@ -179,10 +218,14 @@ export class HandshakeManager {
         userId: this.myUserId,
         deviceId: this.myDeviceId,
         timestamp: this.myChallengeTimestamp,
+        ecdhPublicKey: ecdhPubJwk,
+        supportsAudioSigning: this.iSupportAudioSigning,
       };
 
       this.sendMessage(message);
-      this.log("Challenge an Peer gesendet, warte auf signierte Antwort...");
+      this.log(
+        `Challenge + ECDH Key gesendet (Audio-Signing: ${this.iSupportAudioSigning ? "unterstuetzt" : "nicht unterstuetzt"})`,
+      );
     } catch (err) {
       this.handleVerificationFailure(
         `Fehler beim Senden der Challenge: ${err}`,
@@ -225,8 +268,11 @@ export class HandshakeManager {
     try {
       this.peerUserId = msg.userId;
       this.peerDeviceId = msg.deviceId;
+      this.peerSupportsAudioSigning = msg.supportsAudioSigning ?? false;
 
-      this.log(`Challenge von Peer (${msg.userId.slice(0, 8)}...) empfangen`);
+      this.log(
+        `Challenge von Peer (${msg.userId.slice(0, 8)}...) empfangen (Audio-Signing: ${this.peerSupportsAudioSigning ? "ja" : "nein"})`,
+      );
 
       if (Date.now() - msg.timestamp > HandshakeManager.CHALLENGE_TIMEOUT_MS) {
         this.sendError("Challenge abgelaufen");
@@ -235,6 +281,9 @@ export class HandshakeManager {
         );
         return;
       }
+
+      // Peer ECDH Public Key speichern
+      this.peerECDHPublicKey = await importECDHPublicKey(msg.ecdhPublicKey);
 
       const keyPair = await loadKeyPair(this.myUserId, this.myDeviceId);
       if (!keyPair) {
@@ -253,6 +302,12 @@ export class HandshakeManager {
 
       this.log("Challenge mit eigenem Private Key signiert");
 
+      // Eigenes ECDH-Keypair generieren
+      this.myECDHKeyPair = await generateECDHKeyPair();
+      const ecdhPubJwk = await exportECDHPublicKey(
+        this.myECDHKeyPair.publicKey,
+      );
+
       this.myChallenge = generateChallenge();
       this.myChallengeTimestamp = Date.now();
 
@@ -263,10 +318,14 @@ export class HandshakeManager {
         userId: this.myUserId,
         deviceId: this.myDeviceId,
         timestamp: this.myChallengeTimestamp,
+        ecdhPublicKey: ecdhPubJwk,
+        supportsAudioSigning: this.iSupportAudioSigning,
       };
 
       this.sendMessage(response);
-      this.log("Signierte Antwort + eigene Challenge an Peer gesendet");
+      this.log(
+        "Signierte Antwort + eigene Challenge + ECDH Key an Peer gesendet",
+      );
     } catch (err) {
       this.handleVerificationFailure(
         `Fehler beim Beantworten der Challenge: ${err}`,
@@ -284,9 +343,10 @@ export class HandshakeManager {
     try {
       this.peerUserId = msg.userId;
       this.peerDeviceId = msg.deviceId;
+      this.peerSupportsAudioSigning = msg.supportsAudioSigning ?? false;
 
       this.log(
-        `Signierte Antwort von Peer (${msg.userId.slice(0, 8)}...) empfangen`,
+        `Signierte Antwort von Peer (${msg.userId.slice(0, 8)}...) empfangen (Audio-Signing: ${this.peerSupportsAudioSigning ? "ja" : "nein"})`,
       );
 
       // 1. Peers Signatur verifizieren
@@ -325,6 +385,9 @@ export class HandshakeManager {
 
       this.log("Signatur des Peers verifiziert — Identitaet bestaetigt");
       this.iVerifiedPeer = true;
+
+      // Peer ECDH Public Key speichern (erst NACH Signatur-Verifikation!)
+      this.peerECDHPublicKey = await importECDHPublicKey(msg.ecdhPublicKey);
 
       // 2. Peers Challenge beantworten
       const keyPair = await loadKeyPair(this.myUserId, this.myDeviceId);
@@ -473,11 +536,8 @@ export class HandshakeManager {
       this.peerName = await this.fetchUserName(this.peerUserId);
     }
 
-    // Meine Verifikation des Peers war erfolgreich
-    this.peerVerifiedMe = true; // Wenn wir hier sind, hat der Peer keinen Error gemeldet
+    this.peerVerifiedMe = true;
 
-    // Wenn es vorher einen Fehlschlag gab, muessen BEIDE Richtungen ok sein
-    // bevor wir wieder auf "verified" gehen
     if (this.hadFailure && (!this.iVerifiedPeer || !this.peerVerifiedMe)) {
       this.log(
         "Eigene Verifikation ok, warte aber noch auf Bestaetigung der Gegenseite",
@@ -485,7 +545,35 @@ export class HandshakeManager {
       return;
     }
 
-    // Alles ok — Failures zuruecksetzen
+    // HMAC-Key aus ECDH ableiten — NUR wenn BEIDE Seiten Audio-Signing unterstuetzen
+    const bothSupportAudioSigning =
+      this.iSupportAudioSigning && this.peerSupportsAudioSigning;
+
+    if (
+      bothSupportAudioSigning &&
+      this.myECDHKeyPair?.privateKey &&
+      this.peerECDHPublicKey
+    ) {
+      try {
+        this.hmacKey = await deriveHMACKey(
+          this.myECDHKeyPair.privateKey,
+          this.peerECDHPublicKey,
+        );
+        this.log(
+          "HMAC-Key fuer Audio-Signierung abgeleitet (beide Seiten unterstuetzen es)",
+        );
+      } catch (err) {
+        console.error("[Handshake] HMAC-Key Ableitung fehlgeschlagen:", err);
+      }
+    } else if (!bothSupportAudioSigning) {
+      this.hmacKey = null;
+      if (this.heartbeatCount === 0) {
+        this.log(
+          `Audio-Signierung deaktiviert — ${!this.iSupportAudioSigning ? "eigener Browser" : "Peer"} unterstuetzt keine Insertable Streams`,
+        );
+      }
+    }
+
     this.consecutiveFailures = 0;
 
     this.status = "verified";
@@ -495,6 +583,8 @@ export class HandshakeManager {
       peerDeviceId: this.peerDeviceId ?? undefined,
       peerName: this.peerName ?? undefined,
       heartbeatCount: this.heartbeatCount,
+      hmacKey: this.hmacKey ?? undefined,
+      audioSigningEnabled: bothSupportAudioSigning && !!this.hmacKey,
     });
 
     const name = this.peerName ?? this.peerUserId?.slice(0, 8) + "...";
@@ -658,5 +748,9 @@ export class HandshakeManager {
     this.iVerifiedPeer = false;
     this.peerVerifiedMe = false;
     this.hadFailure = false;
+    this.myECDHKeyPair = null;
+    this.peerECDHPublicKey = null;
+    this.hmacKey = null;
+    this.peerSupportsAudioSigning = false;
   }
 }

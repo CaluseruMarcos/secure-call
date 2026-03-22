@@ -2,13 +2,16 @@ import { api } from "@/convex/_generated/api";
 import { Id } from "@/convex/_generated/dataModel";
 import { ReactMutation } from "convex/react";
 
-const iceServers = {
+const iceServers: any = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
   ],
   iceCandidatePoolSize: 10,
+  // Chrome braucht dies fuer RTCRtpScriptTransform auf Receivern
+  // Firefox ignoriert es einfach
+  encodedInsertableStreams: true,
 };
 
 export interface WebRTCState {
@@ -38,6 +41,7 @@ export function createPeerConnection(
   onRemoteStream: (stream: MediaStream) => void,
   onHandshakeChannel: (channel: RTCDataChannel) => void,
   isCaller: boolean,
+  onAudioReceiver?: (receiver: RTCRtpReceiver) => void,
 ): RTCPeerConnection {
   const pc = new RTCPeerConnection(iceServers);
 
@@ -65,8 +69,14 @@ export function createPeerConnection(
 
   // Remote Stream empfangen
   pc.ontrack = (event) => {
-    console.log("Remote track received");
+    console.log("Remote track received:", event.track.kind);
     onRemoteStream(event.streams[0]);
+
+    // Audio-Receiver sofort an den AudioSigningManager uebergeben
+    // MUSS hier passieren, bevor Frames fliessen!
+    if (event.track.kind === "audio" && onAudioReceiver) {
+      onAudioReceiver(event.receiver);
+    }
   };
 
   if (isCaller) {
@@ -107,10 +117,16 @@ export async function sendSDPOffer(
   pc: RTCPeerConnection,
   localStream: MediaStream,
   updateCall: ReactMutation<typeof api.calls.updateCall>,
+  onTracksAdded?: (pc: RTCPeerConnection) => void,
 ): Promise<void> {
   localStream.getTracks().forEach((track) => {
     pc.addTrack(track, localStream);
   });
+
+  // Callback DIREKT nach addTrack — hier Sender-Transform setzen
+  if (onTracksAdded) {
+    onTracksAdded(pc);
+  }
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -129,12 +145,18 @@ export async function sendSDPAnswer(
   offer: string,
   localStream: MediaStream,
   updateCall: ReactMutation<typeof api.calls.updateCall>,
+  onTracksAdded?: (pc: RTCPeerConnection) => void,
 ): Promise<void> {
   await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offer)));
 
   localStream.getTracks().forEach((track) => {
     pc.addTrack(track, localStream);
   });
+
+  // Callback DIREKT nach addTrack
+  if (onTracksAdded) {
+    onTracksAdded(pc);
+  }
 
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);

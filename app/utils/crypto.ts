@@ -270,6 +270,98 @@ export function buildChallengePayload(
 }
 
 // ============================================================================
+// ECDH Key Exchange (fuer Audio-Signierung)
+// ============================================================================
+
+const ECDH_PARAMS: EcKeyGenParams = {
+  name: "ECDH",
+  namedCurve: "P-256",
+};
+
+/**
+ * Generiert ein temporaeres ECDH-Keypair fuer den Key-Exchange.
+ * Wird bei jedem Handshake/Heartbeat neu generiert.
+ */
+export async function generateECDHKeyPair(): Promise<CryptoKeyPair> {
+  return await crypto.subtle.generateKey(
+    ECDH_PARAMS,
+    false, // Private Key nicht exportierbar
+    ["deriveKey"],
+  );
+}
+
+/**
+ * Exportiert den ECDH Public Key als JWK-String (fuer DataChannel-Transport).
+ */
+export async function exportECDHPublicKey(
+  publicKey: CryptoKey,
+): Promise<string> {
+  const jwk = await crypto.subtle.exportKey("jwk", publicKey);
+  return JSON.stringify(jwk);
+}
+
+/**
+ * Importiert einen ECDH Public Key aus JWK-String.
+ */
+export async function importECDHPublicKey(
+  jwkString: string,
+): Promise<CryptoKey> {
+  const jwk = JSON.parse(jwkString);
+  return await crypto.subtle.importKey(
+    "jwk",
+    jwk,
+    ECDH_PARAMS,
+    false,
+    [], // Public Key fuer deriveKey braucht keine usages
+  );
+}
+
+/**
+ * Leitet aus ECDH Private Key + Peer Public Key einen HMAC-Key ab.
+ * Beide Seiten berechnen den gleichen Key, ohne ihn zu uebertragen.
+ */
+export async function deriveHMACKey(
+  myPrivateKey: CryptoKey,
+  peerPublicKey: CryptoKey,
+): Promise<CryptoKey> {
+  return await crypto.subtle.deriveKey(
+    {
+      name: "ECDH",
+      public: peerPublicKey,
+    },
+    myPrivateKey,
+    {
+      name: "HMAC",
+      hash: "SHA-256",
+      length: 256,
+    },
+    false, // Nicht exportierbar
+    ["sign", "verify"],
+  );
+}
+
+/**
+ * Berechnet HMAC-SHA256 ueber Daten.
+ */
+export async function computeHMAC(
+  hmacKey: CryptoKey,
+  data: ArrayBuffer,
+): Promise<ArrayBuffer> {
+  return await crypto.subtle.sign("HMAC", hmacKey, data);
+}
+
+/**
+ * Verifiziert einen HMAC-SHA256 Tag.
+ */
+export async function verifyHMAC(
+  hmacKey: CryptoKey,
+  signature: ArrayBuffer,
+  data: ArrayBuffer,
+): Promise<boolean> {
+  return await crypto.subtle.verify("HMAC", hmacKey, signature, data);
+}
+
+// ============================================================================
 // Kompletter Setup-Flow
 // ============================================================================
 

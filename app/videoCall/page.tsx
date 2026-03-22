@@ -16,6 +16,7 @@ import {
 } from "../utils/webrtc";
 import { hasKeyPairForDevice } from "../utils/crypto";
 import { HandshakeManager, HandshakeResult, HandshakeStatus } from "../utils/handshake";
+import { AudioSigningManager, AudioSigningStats } from "../utils/audio-signing";
 
 export default function VideoCallPage() {
   const [callId, setCallId] = useState<Id<"calls"> | null>(null);
@@ -65,6 +66,22 @@ export default function VideoCallPage() {
   const handshakeChannelRef = useRef<RTCDataChannel | null>(null);
   const handshakeManagerRef = useRef<HandshakeManager | null>(null);
   const processedCandidatesRef = useRef<Set<string>>(new Set());
+  const audioSigningRef = useRef<AudioSigningManager | null>(null);
+
+  // Audio signing state
+  const [audioSigningActive, setAudioSigningActive] = useState(false);
+  const [invalidAudioFrames, setInvalidAudioFrames] = useState(0);
+  const [audioStats, setAudioStats] = useState<AudioSigningStats | null>(null);
+
+  // Security Dashboard state
+  const [showSecurityPanel, setShowSecurityPanel] = useState(false);
+  const [heartbeatCount, setHeartbeatCount] = useState(0);
+  const [securityLog, setSecurityLog] = useState<{ time: string; message: string; type: "success" | "warning" | "error" | "info" }[]>([]);
+
+  const addSecurityLog = (message: string, type: "success" | "warning" | "error" | "info" = "info") => {
+    const time = new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    setSecurityLog((prev) => [...prev.slice(-20), { time, message, type }]);
+  };
 
   // ============================================================================
   // Geräte-Kryptographie prüfen (Keys wurden bei Login/Register erstellt)
@@ -106,6 +123,7 @@ export default function VideoCallPage() {
       if (!data?._id || !deviceId) return;
 
       handshakeChannelRef.current = channel;
+      addSecurityLog("Sichere Verbindung hergestellt — starte Identitaetspruefung", "info");
 
       // Public Key Lookup via Convex
       const fetchPublicKey = async (
@@ -146,16 +164,41 @@ export default function VideoCallPage() {
               name: result.peerName,
               userId: result.peerUserId,
             });
-            // Fehler löschen wenn wieder verifiziert (z.B. nach temporärem Fehlschlag)
             setError("");
+
+            if (result.heartbeatCount !== undefined) {
+              setHeartbeatCount(result.heartbeatCount);
+            }
+
+            if (result.heartbeatCount === 0) {
+              addSecurityLog(`Identitaet von ${result.peerName ?? "Peer"} bestaetigt`, "success");
+            } else {
+              addSecurityLog(`Identitaet erneut bestaetigt (Pruefung #${result.heartbeatCount})`, "success");
+            }
+
+            // Audio-Signierung: Key an bereits eingerichtete Worker senden
+            if (result.audioSigningEnabled && result.hmacKey && audioSigningRef.current) {
+              if (!audioSigningRef.current.isActive()) {
+                // Erstmalig: Key senden, Worker sind schon eingerichtet
+                audioSigningRef.current.activateWithKey(result.hmacKey);
+                setAudioSigningActive(true);
+                addSecurityLog("Audio-Schutz aktiviert — alle Audiosignale werden signiert", "success");
+              } else {
+                // Heartbeat Key-Rotation
+                audioSigningRef.current.updateKey(result.hmacKey);
+                addSecurityLog("Neuer Schluessel fuer Audio-Schutz erzeugt", "info");
+              }
+            }
           }
 
           if (result.status === "warning") {
             setError(result.error ?? "Verifikation fehlgeschlagen — wird erneut geprüft...");
+            addSecurityLog(result.error ?? "Verifikation fehlgeschlagen — wird geprueft", "warning");
           }
 
           if (result.status === "failed") {
             setError(result.error ?? "Identität konnte nicht bestätigt werden.");
+            addSecurityLog(result.error ?? "Identitaet konnte nicht bestaetigt werden", "error");
           }
         },
       });
@@ -252,12 +295,27 @@ export default function VideoCallPage() {
         localVideoRef.current.srcObject = stream;
       }
 
+      // AudioSigningManager frueh erstellen
+      const signingManager = new AudioSigningManager(
+        (stats) => setAudioStats(stats),
+        (count) => {
+          setInvalidAudioFrames(count);
+          if (count === 1) {
+            addSecurityLog("Ungueltiges Audio-Paket erkannt und blockiert!", "error");
+          }
+        }
+      );
+      audioSigningRef.current = signingManager;
+      (window as any).__audioSigning = signingManager;
+
       const pc = createPeerConnection(
         incomingCallData._id,
         addIceCandidateMutation,
         handleRemoteStream,
-        (channel) => startHandshakeOnChannel(channel, false), // Callee: wartet auf Challenge
-        false // isCaller = false
+        (channel) => startHandshakeOnChannel(channel, false),
+        false,
+        // Receiver-Transform SOFORT im ontrack setzen
+        (receiver) => signingManager.setupReceiverForTrack(receiver)
       );
       peerConnectionRef.current = pc;
 
@@ -269,15 +327,19 @@ export default function VideoCallPage() {
           pc,
           incomingCallData.offer,
           stream,
-          updateCall
+          updateCall,
+          () => {
+            // Sender-Transform DIREKT nach addTrack setzen
+            signingManager.setupSender(pc);
+          }
         );
+
         setIsConnected(true);
         setConnectionStatus("Connected (answer sent)");
       }
     } catch (err) {
       console.error("Error accepting call:", err);
       setError("Failed to accept call: " + (err instanceof Error ? err.message : "Unknown error"));
-      // Call in DB als fehlgeschlagen markieren, damit die Query ihn nicht mehr zurückgibt
       if (incomingCallData?._id) {
         try {
           await rejectCallMutation({ callId: incomingCallData._id });
@@ -330,6 +392,19 @@ export default function VideoCallPage() {
         localVideoRef.current.srcObject = stream;
       }
 
+      // AudioSigningManager frueh erstellen (noch ohne Key)
+      const signingManager = new AudioSigningManager(
+        (stats) => setAudioStats(stats),
+        (count) => {
+          setInvalidAudioFrames(count);
+          if (count === 1) {
+            addSecurityLog("Ungueltiges Audio-Paket erkannt und blockiert!", "error");
+          }
+        }
+      );
+      audioSigningRef.current = signingManager;
+      (window as any).__audioSigning = signingManager;
+
       const call = await createCall({ calleeUserId: userId as Id<"users"> });
       setCallId(call.call);
 
@@ -337,12 +412,17 @@ export default function VideoCallPage() {
         call.call,
         addIceCandidateMutation,
         handleRemoteStream,
-        (channel) => startHandshakeOnChannel(channel, true), // Caller: startet Handshake
-        true // isCaller = true
+        (channel) => startHandshakeOnChannel(channel, true),
+        true,
+        // Receiver-Transform SOFORT im ontrack setzen
+        (receiver) => signingManager.setupReceiverForTrack(receiver)
       );
       peerConnectionRef.current = pc;
 
-      await sendSDPOffer(call.call, pc, stream, updateCall);
+      await sendSDPOffer(call.call, pc, stream, updateCall, () => {
+        // Sender-Transform DIREKT nach addTrack setzen
+        signingManager.setupSender(pc);
+      });
 
       setIsConnected(true);
       setConnectionStatus("Connected (offer sent, waiting for answer)");
@@ -356,6 +436,16 @@ export default function VideoCallPage() {
   };
 
   const cleanup = () => {
+    // Audio-Signierung stoppen
+    if (audioSigningRef.current) {
+      audioSigningRef.current.destroy();
+      audioSigningRef.current = null;
+    }
+    (window as any).__audioSigning = null;
+    setAudioSigningActive(false);
+    setInvalidAudioFrames(0);
+    setAudioStats(null);
+
     if (handshakeManagerRef.current) {
       handshakeManagerRef.current.destroy();
       handshakeManagerRef.current = null;
@@ -516,6 +606,22 @@ export default function VideoCallPage() {
               {/* Verification Badge */}
               {isConnected && renderVerificationBadge()}
 
+              {/* Security Dashboard Toggle */}
+              {isConnected && (
+                <button
+                  onClick={() => setShowSecurityPanel(!showSecurityPanel)}
+                  className={`inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-4 py-2 active:scale-[0.98] ${showSecurityPanel
+                      ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                      : "border border-input bg-background hover:bg-accent hover:text-accent-foreground"
+                    }`}
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                  </svg>
+                  Sicherheit
+                </button>
+              )}
+
               {/* Logout Button */}
               <button
                 onClick={handleLogout}
@@ -633,6 +739,131 @@ export default function VideoCallPage() {
         </div>
       )}
 
+      {/* Security Dashboard Panel */}
+      {showSecurityPanel && isConnected && (
+        <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
+          <div className="bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm">
+            <div className="border-b border-border bg-muted/30 px-6 py-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold tracking-tight">Sicherheits-Dashboard</h2>
+              <button onClick={() => setShowSecurityPanel(false)} className="text-muted-foreground hover:text-foreground">
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6">
+              {/* 3 Security Layers */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                {/* Layer 1: Identity */}
+                <div className={`rounded-lg p-4 border ${handshakeStatus === "verified"
+                    ? "bg-green-500/5 border-green-500/20"
+                    : handshakeStatus === "failed"
+                      ? "bg-red-500/5 border-red-500/20"
+                      : "bg-muted/30 border-border"
+                  }`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    {handshakeStatus === "verified" ? (
+                      <span className="w-2 h-2 bg-green-500 rounded-full" />
+                    ) : handshakeStatus === "failed" ? (
+                      <span className="w-2 h-2 bg-red-500 rounded-full" />
+                    ) : (
+                      <span className="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" />
+                    )}
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Identitaet</p>
+                  </div>
+                  <p className="text-sm font-medium">
+                    {handshakeStatus === "verified" && verifiedPeer
+                      ? verifiedPeer.name ?? "Bestaetigt"
+                      : handshakeStatus === "failed"
+                        ? "Nicht bestaetigt"
+                        : "Wird geprueft..."}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {handshakeStatus === "verified"
+                      ? "Digitale Signatur verifiziert"
+                      : handshakeStatus === "failed"
+                        ? "Signatur ungueltig"
+                        : "Challenge-Response laeuft"}
+                  </p>
+                </div>
+
+                {/* Layer 2: Heartbeat */}
+                <div className={`rounded-lg p-4 border ${heartbeatCount > 0 && handshakeStatus === "verified"
+                    ? "bg-green-500/5 border-green-500/20"
+                    : "bg-muted/30 border-border"
+                  }`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    {heartbeatCount > 0 && handshakeStatus === "verified" ? (
+                      <span className="w-2 h-2 bg-green-500 rounded-full" />
+                    ) : (
+                      <span className="w-2 h-2 bg-muted-foreground rounded-full" />
+                    )}
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Laufende Pruefung</p>
+                  </div>
+                  <p className="text-sm font-medium">
+                    {heartbeatCount > 0 ? `${heartbeatCount}x geprueft` : "Warte auf erste Pruefung"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Alle 30 Sekunden wird die Identitaet erneut verifiziert
+                  </p>
+                </div>
+
+                {/* Layer 3: Audio Signing */}
+                <div className={`rounded-lg p-4 border ${audioSigningActive
+                    ? "bg-green-500/5 border-green-500/20"
+                    : "bg-muted/30 border-border"
+                  }`}>
+                  <div className="flex items-center gap-2 mb-2">
+                    {audioSigningActive ? (
+                      <span className="w-2 h-2 bg-green-500 rounded-full" />
+                    ) : (
+                      <span className="w-2 h-2 bg-muted-foreground rounded-full" />
+                    )}
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Audio-Schutz</p>
+                  </div>
+                  <p className="text-sm font-medium">
+                    {audioSigningActive ? "Aktiv" : "Nicht verfuegbar"}
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {audioSigningActive
+                      ? "Jedes Audiopaket wird digital signiert"
+                      : "Browser unterstuetzt kein Audio-Signing"}
+                  </p>
+                </div>
+              </div>
+
+              {/* Security Log */}
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Sicherheits-Protokoll</p>
+                <div className="bg-background/50 rounded-lg border border-border p-3 max-h-48 overflow-y-auto">
+                  {securityLog.length === 0 ? (
+                    <p className="text-xs text-muted-foreground text-center py-2">Noch keine Ereignisse</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {securityLog.map((entry, i) => (
+                        <div key={i} className="flex items-start gap-2 text-xs">
+                          <span className="text-muted-foreground font-mono whitespace-nowrap">{entry.time}</span>
+                          <span className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${entry.type === "success" ? "bg-green-500" :
+                              entry.type === "warning" ? "bg-yellow-500" :
+                                entry.type === "error" ? "bg-red-500" :
+                                  "bg-blue-400"
+                            }`} />
+                          <span className={
+                            entry.type === "error" ? "text-red-400" :
+                              entry.type === "warning" ? "text-yellow-400" :
+                                "text-foreground"
+                          }>{entry.message}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Video container */}
       <div className="relative z-10 flex-1 max-w-7xl mx-auto w-full">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
@@ -661,12 +892,12 @@ export default function VideoCallPage() {
 
           {/* Remote video */}
           <div className={`relative bg-card rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm transition-all duration-500 hover:shadow-[0_20px_70px_-15px_rgba(0,0,0,0.3)] border-2 ${handshakeStatus === "failed"
-            ? "border-red-500/60"
-            : handshakeStatus === "warning"
-              ? "border-red-400/40 animate-pulse"
-              : handshakeStatus === "verified"
-                ? "border-green-500/30"
-                : "border-border"
+              ? "border-red-500/60"
+              : handshakeStatus === "warning"
+                ? "border-red-400/40 animate-pulse"
+                : handshakeStatus === "verified"
+                  ? "border-green-500/30"
+                  : "border-border"
             }`}>
             {/* Remote Peer Label mit Verifikations-Status */}
             <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
@@ -780,7 +1011,7 @@ export default function VideoCallPage() {
           {/* Debug info */}
           <div className="mt-4 pt-4 border-t border-border">
             <p className="text-xs text-muted-foreground text-center">
-              WebRTC with ICE &bull; Call ID: {callId || "None"} &bull; Candidates: {processedCandidatesRef.current.size} &bull; Handshake: {handshakeStatus} &bull; Device: {deviceId?.slice(0, 8) ?? "..."}
+              WebRTC with ICE &bull; Call ID: {callId || "None"} &bull; Handshake: {handshakeStatus} &bull; Audio-Signing: {audioSigningActive ? "aktiv" : "inaktiv"}{audioStats ? ` (gesendet: ${audioStats.sender.signedFrames}, empfangen: ${audioStats.receiver.validFrames}, verworfen: ${audioStats.receiver.invalidFrames})` : ""}
             </p>
           </div>
         </div>
