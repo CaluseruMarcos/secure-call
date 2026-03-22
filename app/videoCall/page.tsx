@@ -146,10 +146,16 @@ export default function VideoCallPage() {
               name: result.peerName,
               userId: result.peerUserId,
             });
+            // Fehler löschen wenn wieder verifiziert (z.B. nach temporärem Fehlschlag)
+            setError("");
+          }
+
+          if (result.status === "warning") {
+            setError(result.error ?? "Verifikation fehlgeschlagen — wird erneut geprüft...");
           }
 
           if (result.status === "failed") {
-            setError(`Handshake fehlgeschlagen: ${result.error}`);
+            setError(result.error ?? "Identität konnte nicht bestätigt werden.");
           }
         },
       });
@@ -270,8 +276,16 @@ export default function VideoCallPage() {
       }
     } catch (err) {
       console.error("Error accepting call:", err);
-      setError("Failed to accept call");
+      setError("Failed to accept call: " + (err instanceof Error ? err.message : "Unknown error"));
+      // Call in DB als fehlgeschlagen markieren, damit die Query ihn nicht mehr zurückgibt
+      if (incomingCallData?._id) {
+        try {
+          await rejectCallMutation({ callId: incomingCallData._id });
+        } catch { /* ignore */ }
+      }
       setIsConnecting(false);
+      setShowIncomingCall(false);
+      setIncomingCallData(null);
       cleanup();
     }
   };
@@ -424,15 +438,29 @@ export default function VideoCallPage() {
       );
     }
 
-    if (handshakeStatus === "failed") {
+    if (handshakeStatus === "warning") {
       return (
-        <div className="flex items-center gap-2 bg-destructive/10 border border-destructive/20 rounded-lg px-3 py-2">
-          <svg className="w-5 h-5 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 animate-pulse">
+          <svg className="w-5 h-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
           </svg>
           <div>
-            <p className="text-sm font-medium text-destructive">Nicht verifiziert</p>
-            <p className="text-xs text-destructive/70">Identität konnte nicht bestätigt werden</p>
+            <p className="text-sm font-medium text-red-400">Möglicher Angriff</p>
+            <p className="text-xs text-red-400/70">Wird überprüft...</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (handshakeStatus === "failed") {
+      return (
+        <div className="flex items-center gap-2 bg-red-600/15 border border-red-600/30 rounded-lg px-3 py-2">
+          <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+          <div>
+            <p className="text-sm font-medium text-red-500">Möglicher Angriff</p>
+            <p className="text-xs text-red-500/70">Identität nicht bestätigt</p>
           </div>
         </div>
       );
@@ -599,7 +627,7 @@ export default function VideoCallPage() {
       {/* Error message */}
       {error && (
         <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
-          <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 text-sm text-destructive">
+          <div className="bg-red-600/15 border border-red-600/30 rounded-lg p-4 text-sm text-red-400 font-medium">
             {error}
           </div>
         </div>
@@ -632,7 +660,14 @@ export default function VideoCallPage() {
           </div>
 
           {/* Remote video */}
-          <div className="relative bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm transition-all duration-500 hover:shadow-[0_20px_70px_-15px_rgba(0,0,0,0.3)]">
+          <div className={`relative bg-card rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm transition-all duration-500 hover:shadow-[0_20px_70px_-15px_rgba(0,0,0,0.3)] border-2 ${handshakeStatus === "failed"
+            ? "border-red-500/60"
+            : handshakeStatus === "warning"
+              ? "border-red-400/40 animate-pulse"
+              : handshakeStatus === "verified"
+                ? "border-green-500/30"
+                : "border-border"
+            }`}>
             {/* Remote Peer Label mit Verifikations-Status */}
             <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
               <div className="bg-background/80 backdrop-blur-sm px-3 py-1.5 rounded-md border border-border">
@@ -648,10 +683,17 @@ export default function VideoCallPage() {
                   </svg>
                 </div>
               )}
+              {handshakeStatus === "warning" && (
+                <div className="bg-red-500/20 backdrop-blur-sm p-1.5 rounded-md border border-red-500/30 animate-pulse">
+                  <svg className="w-4 h-4 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                  </svg>
+                </div>
+              )}
               {handshakeStatus === "failed" && (
-                <div className="bg-destructive/20 backdrop-blur-sm p-1.5 rounded-md border border-destructive/30">
-                  <svg className="w-4 h-4 text-destructive" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                <div className="bg-red-600/20 backdrop-blur-sm p-1.5 rounded-md border border-red-600/30">
+                  <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                   </svg>
                 </div>
               )}

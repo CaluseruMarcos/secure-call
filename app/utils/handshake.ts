@@ -1,15 +1,5 @@
 // ============================================================================
-// handshake.ts — Challenge-Response Handshake über WebRTC DataChannel
-//
-// Ablauf:
-// 1. Alice sendet: { type: "challenge", challenge, userId, deviceId, timestamp }
-// 2. Bob empfängt, verifiziert Alices Public Key via Convex,
-//    signiert Alices Challenge und sendet zurück:
-//    { type: "challenge-response", challengeResponse (signiert),
-//      challenge (Bobs eigene), userId, deviceId, timestamp }
-// 3. Alice verifiziert Bobs Signatur, signiert Bobs Challenge, sendet:
-//    { type: "response", challengeResponse (signiert) }
-// 4. Bob verifiziert → beide Seiten sind verifiziert ✓
+// handshake.ts — Challenge-Response Handshake ueber WebRTC DataChannel
 // ============================================================================
 
 import {
@@ -29,11 +19,12 @@ import {
 
 export type HandshakeStatus =
   | "idle"
-  | "waiting" // Challenge gesendet, warte auf Antwort
-  | "responding" // Challenge empfangen, antworte
-  | "verifying" // Antwort empfangen, verifiziere
-  | "verified" // Beide Seiten verifiziert ✓
-  | "failed"; // Verifikation fehlgeschlagen ✗
+  | "waiting"
+  | "responding"
+  | "verifying"
+  | "verified"
+  | "warning"
+  | "failed";
 
 export interface HandshakeResult {
   status: HandshakeStatus;
@@ -41,12 +32,13 @@ export interface HandshakeResult {
   peerDeviceId?: string;
   peerName?: string;
   error?: string;
+  heartbeatCount?: number;
 }
 
-// Nachrichten-Typen für den DataChannel
+// DataChannel Nachrichten-Typen
 interface ChallengeMessage {
   type: "challenge";
-  challenge: string; // Base64-encoded Challenge-Nonce
+  challenge: string;
   userId: string;
   deviceId: string;
   timestamp: number;
@@ -54,8 +46,8 @@ interface ChallengeMessage {
 
 interface ChallengeResponseMessage {
   type: "challenge-response";
-  challengeResponse: string; // Base64-encoded Signatur der empfangenen Challenge
-  challenge: string; // Eigene Challenge (Base64)
+  challengeResponse: string;
+  challenge: string;
   userId: string;
   deviceId: string;
   timestamp: number;
@@ -63,7 +55,7 @@ interface ChallengeResponseMessage {
 
 interface ResponseMessage {
   type: "response";
-  challengeResponse: string; // Base64-encoded Signatur
+  challengeResponse: string;
 }
 
 interface HandshakeErrorMessage {
@@ -77,13 +69,11 @@ type HandshakeMessage =
   | ResponseMessage
   | HandshakeErrorMessage;
 
-// Callback um Public Key vom Convex zu holen
 export type FetchPublicKeyFn = (
   userId: string,
   deviceId: string,
-) => Promise<string | null>; // Gibt JWK-String zurück oder null
+) => Promise<string | null>;
 
-// Callback um Nutzername zu holen
 export type FetchUserNameFn = (userId: string) => Promise<string | null>;
 
 // ============================================================================
@@ -98,14 +88,31 @@ export class HandshakeManager {
   private fetchUserName: FetchUserNameFn;
   private onStatusChange: (result: HandshakeResult) => void;
 
-  // Interner State
+  // State
   private myChallenge: Uint8Array | null = null;
   private myChallengeTimestamp: number = 0;
   private status: HandshakeStatus = "idle";
   private peerUserId: string | null = null;
   private peerDeviceId: string | null = null;
+  private peerName: string | null = null;
+  private isInitiator: boolean = false;
 
-  // Timeout für abgelaufene Challenges (30 Sekunden)
+  // Heartbeat
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private heartbeatCount: number = 0;
+  private static HEARTBEAT_INTERVAL_MS = 30_000;
+
+  // Retry
+  private consecutiveFailures: number = 0;
+  private static MAX_RETRIES = 1;
+
+  // Sticky failure: Einmal failed → bleibt failed bis BEIDE Richtungen klappen
+  // Wir tracken ob WIR den Peer erfolgreich verifiziert haben UND ob der Peer UNS verifiziert hat
+  private iVerifiedPeer: boolean = false; // Habe ich den Peer verifiziert?
+  private peerVerifiedMe: boolean = false; // Hat der Peer mich verifiziert? (kein Error von ihm)
+  private hadFailure: boolean = false; // Gab es jemals einen Fehlschlag?
+
+  // Challenge Timeout
   private static CHALLENGE_TIMEOUT_MS = 30_000;
 
   constructor(params: {
@@ -123,21 +130,48 @@ export class HandshakeManager {
     this.fetchUserName = params.fetchUserName;
     this.onStatusChange = params.onStatusChange;
 
-    // DataChannel-Nachrichten verarbeiten
     this.dataChannel.onmessage = (event) => {
       this.handleMessage(event.data);
     };
   }
 
   // ============================================================================
-  // Phase 1: Challenge senden (Initiator / Alice)
+  // Logging
+  // ============================================================================
+
+  private log(message: string): void {
+    const prefix =
+      this.heartbeatCount > 0
+        ? `[Heartbeat #${this.heartbeatCount}]`
+        : "[Handshake]";
+    console.log(`${prefix} ${message}`);
+  }
+
+  private logError(message: string): void {
+    const prefix =
+      this.heartbeatCount > 0
+        ? `[Heartbeat #${this.heartbeatCount}]`
+        : "[Handshake]";
+    console.error(`${prefix} FEHLER: ${message}`);
+  }
+
+  // ============================================================================
+  // Phase 1: Challenge senden
   // ============================================================================
 
   async startHandshake(): Promise<void> {
     try {
+      this.isInitiator = true;
       this.myChallenge = generateChallenge();
       this.myChallengeTimestamp = Date.now();
-      this.updateStatus("waiting");
+
+      if (
+        this.status !== "verified" &&
+        this.status !== "warning" &&
+        this.status !== "failed"
+      ) {
+        this.updateStatus("waiting");
+      }
 
       const message: ChallengeMessage = {
         type: "challenge",
@@ -148,9 +182,11 @@ export class HandshakeManager {
       };
 
       this.sendMessage(message);
-      console.log("[Handshake] Challenge gesendet");
+      this.log("Challenge an Peer gesendet, warte auf signierte Antwort...");
     } catch (err) {
-      this.fail(`Fehler beim Senden der Challenge: ${err}`);
+      this.handleVerificationFailure(
+        `Fehler beim Senden der Challenge: ${err}`,
+      );
     }
   }
 
@@ -173,10 +209,7 @@ export class HandshakeManager {
           await this.handleResponse(message);
           break;
         case "handshake-error":
-          this.fail(`Peer-Fehler: ${message.error}`);
-          break;
-        default:
-          // Ignoriere unbekannte Nachrichten (könnten von anderen Features sein)
+          this.handlePeerReportedError(message.error);
           break;
       }
     } catch (err) {
@@ -185,30 +218,30 @@ export class HandshakeManager {
   }
 
   // ============================================================================
-  // Phase 2: Challenge empfangen & beantworten (Bob)
+  // Phase 2: Challenge empfangen, signieren, eigene Challenge senden
   // ============================================================================
 
   private async handleChallenge(msg: ChallengeMessage): Promise<void> {
     try {
-      this.updateStatus("responding");
       this.peerUserId = msg.userId;
       this.peerDeviceId = msg.deviceId;
 
-      // Timestamp prüfen (gegen Replay)
+      this.log(`Challenge von Peer (${msg.userId.slice(0, 8)}...) empfangen`);
+
       if (Date.now() - msg.timestamp > HandshakeManager.CHALLENGE_TIMEOUT_MS) {
         this.sendError("Challenge abgelaufen");
-        this.fail("Empfangene Challenge ist abgelaufen");
+        this.handleVerificationFailure(
+          "Empfangene Challenge ist abgelaufen (aelter als 30s)",
+        );
         return;
       }
 
-      // Private Key laden
       const keyPair = await loadKeyPair(this.myUserId, this.myDeviceId);
       if (!keyPair) {
-        this.fail("Kein Schlüsselpaar für dieses Gerät gefunden");
+        this.handleVerificationFailure("Kein eigenes Schluesselpaar gefunden");
         return;
       }
 
-      // Challenge-Payload bauen und signieren
       const challengeNonce = new Uint8Array(base64ToArrayBuffer(msg.challenge));
       const payload = buildChallengePayload(
         challengeNonce,
@@ -218,11 +251,11 @@ export class HandshakeManager {
       );
       const signature = await signData(keyPair.privateKey, payload);
 
-      // Eigene Challenge generieren
+      this.log("Challenge mit eigenem Private Key signiert");
+
       this.myChallenge = generateChallenge();
       this.myChallengeTimestamp = Date.now();
 
-      // Antwort mit eigener Challenge senden
       const response: ChallengeResponseMessage = {
         type: "challenge-response",
         challengeResponse: arrayBufferToBase64(signature),
@@ -233,17 +266,16 @@ export class HandshakeManager {
       };
 
       this.sendMessage(response);
-      this.updateStatus("verifying");
-      console.log(
-        "[Handshake] Challenge beantwortet + eigene Challenge gesendet",
-      );
+      this.log("Signierte Antwort + eigene Challenge an Peer gesendet");
     } catch (err) {
-      this.fail(`Fehler beim Beantworten der Challenge: ${err}`);
+      this.handleVerificationFailure(
+        `Fehler beim Beantworten der Challenge: ${err}`,
+      );
     }
   }
 
   // ============================================================================
-  // Phase 3: Antwort empfangen & verifizieren (Alice)
+  // Phase 3: Signierte Antwort verifizieren, Peers Challenge beantworten
   // ============================================================================
 
   private async handleChallengeResponse(
@@ -252,31 +284,30 @@ export class HandshakeManager {
     try {
       this.peerUserId = msg.userId;
       this.peerDeviceId = msg.deviceId;
-      this.updateStatus("verifying");
 
-      // 1. Bobs Signatur auf meine Challenge verifizieren
+      this.log(
+        `Signierte Antwort von Peer (${msg.userId.slice(0, 8)}...) empfangen`,
+      );
+
+      // 1. Peers Signatur verifizieren
       const peerPublicKeyJwk = await this.fetchPublicKey(
         msg.userId,
         msg.deviceId,
       );
-
       if (!peerPublicKeyJwk) {
-        this.fail(
-          `Kein Public Key für Gerät ${msg.deviceId} von User ${msg.userId} gefunden`,
+        this.handleVerificationFailure(
+          `Kein Public Key fuer Peer in der Datenbank gefunden`,
         );
         return;
       }
 
       const peerPublicKey = await importPublicKey(peerPublicKeyJwk);
-
-      // Challenge-Payload rekonstruieren (meine Challenge, meine userId/deviceId)
       const payload = buildChallengePayload(
         this.myChallenge!,
         this.myUserId,
         this.myDeviceId,
         this.myChallengeTimestamp,
       );
-
       const signatureBuffer = base64ToArrayBuffer(msg.challengeResponse);
       const isValid = await verifySignature(
         peerPublicKey,
@@ -286,23 +317,25 @@ export class HandshakeManager {
 
       if (!isValid) {
         this.sendError("Signatur-Verifikation fehlgeschlagen");
-        this.fail("Peer-Signatur ist ungültig — möglicherweise ein Angreifer!");
+        this.handleVerificationFailure(
+          "Signatur des Peers ist ungueltig — Die Identitaet des Gespraechspartners konnte nicht bestaetigt werden",
+        );
         return;
       }
 
-      console.log("[Handshake] Peer-Signatur verifiziert ✓");
+      this.log("Signatur des Peers verifiziert — Identitaet bestaetigt");
+      this.iVerifiedPeer = true;
 
-      // 2. Bobs Challenge beantworten
+      // 2. Peers Challenge beantworten
       const keyPair = await loadKeyPair(this.myUserId, this.myDeviceId);
       if (!keyPair) {
-        this.fail("Kein Schlüsselpaar für dieses Gerät gefunden");
+        this.handleVerificationFailure("Kein eigenes Schluesselpaar gefunden");
         return;
       }
 
-      // Timestamp prüfen
       if (Date.now() - msg.timestamp > HandshakeManager.CHALLENGE_TIMEOUT_MS) {
         this.sendError("Challenge abgelaufen");
-        this.fail("Peer-Challenge ist abgelaufen");
+        this.handleVerificationFailure("Peers Challenge ist abgelaufen");
         return;
       }
 
@@ -320,52 +353,51 @@ export class HandshakeManager {
         responsePayload,
       );
 
-      const response: ResponseMessage = {
+      this.log("Peers Challenge mit eigenem Private Key signiert");
+
+      this.sendMessage({
         type: "response",
         challengeResponse: arrayBufferToBase64(responseSignature),
-      };
+      });
 
-      this.sendMessage(response);
-
-      // Alice ist jetzt verifiziert (hat Bobs Signatur geprüft)
-      // und hat Bobs Challenge beantwortet
-      await this.completeHandshake();
+      this.log("Signierte Antwort an Peer gesendet");
+      await this.tryCompleteHandshake();
     } catch (err) {
-      this.fail(`Fehler bei Challenge-Response-Verarbeitung: ${err}`);
+      this.handleVerificationFailure(`Fehler bei Verifikation: ${err}`);
     }
   }
 
   // ============================================================================
-  // Phase 4: Finale Antwort empfangen & verifizieren (Bob)
+  // Phase 4: Finale Antwort verifizieren
   // ============================================================================
 
   private async handleResponse(msg: ResponseMessage): Promise<void> {
     try {
       if (!this.peerUserId || !this.peerDeviceId || !this.myChallenge) {
-        this.fail("Ungültiger Handshake-State");
+        this.handleVerificationFailure("Ungueltiger Handshake-Status");
         return;
       }
 
-      // Alices Signatur auf meine Challenge verifizieren
+      this.log(
+        `Finale signierte Antwort von Peer (${this.peerUserId.slice(0, 8)}...) empfangen`,
+      );
+
       const peerPublicKeyJwk = await this.fetchPublicKey(
         this.peerUserId,
         this.peerDeviceId,
       );
-
       if (!peerPublicKeyJwk) {
-        this.fail("Kein Public Key für Peer gefunden");
+        this.handleVerificationFailure("Kein Public Key fuer Peer gefunden");
         return;
       }
 
       const peerPublicKey = await importPublicKey(peerPublicKeyJwk);
-
       const payload = buildChallengePayload(
         this.myChallenge,
         this.myUserId,
         this.myDeviceId,
         this.myChallengeTimestamp,
       );
-
       const signatureBuffer = base64ToArrayBuffer(msg.challengeResponse);
       const isValid = await verifySignature(
         peerPublicKey,
@@ -375,14 +407,212 @@ export class HandshakeManager {
 
       if (!isValid) {
         this.sendError("Signatur-Verifikation fehlgeschlagen");
-        this.fail("Peer-Signatur ist ungültig — möglicherweise ein Angreifer!");
+        this.handleVerificationFailure(
+          "Signatur des Peers ist ungueltig — Die Identitaet des Gespraechspartners konnte nicht bestaetigt werden",
+        );
         return;
       }
 
-      console.log("[Handshake] Finale Verifikation erfolgreich ✓");
-      await this.completeHandshake();
+      this.log("Signatur des Peers verifiziert — Identitaet bestaetigt");
+      this.iVerifiedPeer = true;
+
+      await this.tryCompleteHandshake();
     } catch (err) {
-      this.fail(`Fehler bei finaler Verifikation: ${err}`);
+      this.handleVerificationFailure(`Fehler bei finaler Verifikation: ${err}`);
+    }
+  }
+
+  // ============================================================================
+  // Peer meldet Fehler — mein Key konnte nicht verifiziert werden
+  // ============================================================================
+
+  private handlePeerReportedError(peerError: string): void {
+    this.peerVerifiedMe = false;
+    this.hadFailure = true;
+
+    this.logError(
+      `Gegenseite konnte unsere Identitaet nicht bestaetigen (${peerError})`,
+    );
+
+    this.consecutiveFailures++;
+
+    if (this.consecutiveFailures <= HandshakeManager.MAX_RETRIES) {
+      this.status = "warning";
+      this.onStatusChange({
+        status: "warning",
+        error:
+          "Möglicher Angriff auf Sie — jemand könnte sich als Sie ausgeben. Wird überprüft...",
+        peerUserId: this.peerUserId ?? undefined,
+        peerDeviceId: this.peerDeviceId ?? undefined,
+        peerName: this.peerName ?? undefined,
+        heartbeatCount: this.heartbeatCount,
+      });
+    } else {
+      this.status = "failed";
+      this.onStatusChange({
+        status: "failed",
+        error:
+          "Möglicher Angriff auf Sie — jemand könnte sich als Sie ausgeben.",
+        peerUserId: this.peerUserId ?? undefined,
+        peerDeviceId: this.peerDeviceId ?? undefined,
+        peerName: this.peerName ?? undefined,
+        heartbeatCount: this.heartbeatCount,
+      });
+
+      this.log("Heartbeat laeuft weiter — ueberwache Verbindung");
+      this.startHeartbeat();
+    }
+  }
+
+  // ============================================================================
+  // Handshake abschliessen — nur wenn BEIDE Richtungen ok sind
+  // ============================================================================
+
+  private async tryCompleteHandshake(): Promise<void> {
+    if (this.peerUserId && !this.peerName) {
+      this.peerName = await this.fetchUserName(this.peerUserId);
+    }
+
+    // Meine Verifikation des Peers war erfolgreich
+    this.peerVerifiedMe = true; // Wenn wir hier sind, hat der Peer keinen Error gemeldet
+
+    // Wenn es vorher einen Fehlschlag gab, muessen BEIDE Richtungen ok sein
+    // bevor wir wieder auf "verified" gehen
+    if (this.hadFailure && (!this.iVerifiedPeer || !this.peerVerifiedMe)) {
+      this.log(
+        "Eigene Verifikation ok, warte aber noch auf Bestaetigung der Gegenseite",
+      );
+      return;
+    }
+
+    // Alles ok — Failures zuruecksetzen
+    this.consecutiveFailures = 0;
+
+    this.status = "verified";
+    this.onStatusChange({
+      status: "verified",
+      peerUserId: this.peerUserId ?? undefined,
+      peerDeviceId: this.peerDeviceId ?? undefined,
+      peerName: this.peerName ?? undefined,
+      heartbeatCount: this.heartbeatCount,
+    });
+
+    const name = this.peerName ?? this.peerUserId?.slice(0, 8) + "...";
+
+    if (this.heartbeatCount === 0) {
+      this.log(`Gegenseitig verifiziert mit ${name}`);
+    } else if (this.hadFailure) {
+      this.log(`Verbindung wieder sicher — ${name} erneut verifiziert`);
+      this.hadFailure = false;
+    } else {
+      this.log(`Identitaet von ${name} erneut bestaetigt`);
+    }
+
+    this.startHeartbeat();
+  }
+
+  // ============================================================================
+  // ICH konnte den Peer nicht verifizieren
+  // ============================================================================
+
+  private handleVerificationFailure(error: string): void {
+    this.iVerifiedPeer = false;
+    this.hadFailure = true;
+    this.consecutiveFailures++;
+
+    if (this.consecutiveFailures <= HandshakeManager.MAX_RETRIES) {
+      this.logError(
+        `${error} — Automatischer Retry (${this.consecutiveFailures}/${HandshakeManager.MAX_RETRIES})...`,
+      );
+
+      this.status = "warning";
+      this.onStatusChange({
+        status: "warning",
+        error:
+          "Möglicher Angriff — jemand könnte sich als Ihren Gesprächspartner ausgeben. Wird überprüft...",
+        peerUserId: this.peerUserId ?? undefined,
+        peerDeviceId: this.peerDeviceId ?? undefined,
+        peerName: this.peerName ?? undefined,
+        heartbeatCount: this.heartbeatCount,
+      });
+
+      setTimeout(() => {
+        if (this.dataChannel.readyState === "open") {
+          this.log("Starte Retry-Verifikation...");
+          this.startHandshake();
+        }
+      }, 2000);
+    } else {
+      this.logError(
+        `${error} — ENDGUELTIG FEHLGESCHLAGEN nach ${this.consecutiveFailures} Versuchen`,
+      );
+
+      this.status = "failed";
+      this.onStatusChange({
+        status: "failed",
+        error:
+          "Möglicher Angriff — jemand könnte sich als Ihren Gesprächspartner ausgeben. Seien Sie vorsichtig!",
+        peerUserId: this.peerUserId ?? undefined,
+        peerDeviceId: this.peerDeviceId ?? undefined,
+        peerName: this.peerName ?? undefined,
+        heartbeatCount: this.heartbeatCount,
+      });
+
+      this.log(
+        "Heartbeat laeuft weiter — ueberwache ob Verbindung wieder sicher wird",
+      );
+      this.startHeartbeat();
+    }
+  }
+
+  // ============================================================================
+  // Heartbeat
+  // ============================================================================
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+
+    const offset = this.isInitiator ? 0 : 5_000;
+
+    setTimeout(() => {
+      this.heartbeatInterval = setInterval(async () => {
+        if (this.dataChannel.readyState !== "open") {
+          this.log("DataChannel geschlossen — stoppe Heartbeat");
+          this.stopHeartbeat();
+          return;
+        }
+
+        if (
+          this.status !== "verified" &&
+          this.status !== "failed" &&
+          this.status !== "warning"
+        ) {
+          return;
+        }
+
+        this.heartbeatCount++;
+
+        // Bei neuem Heartbeat-Zyklus die Richtungs-Flags zuruecksetzen
+        this.iVerifiedPeer = false;
+        this.peerVerifiedMe = !this.hadFailure; // Optimistisch, wird auf false gesetzt wenn Peer Error meldet
+
+        this.log("Starte Re-Verifikation...");
+        await this.startHandshake();
+      }, HandshakeManager.HEARTBEAT_INTERVAL_MS);
+    }, offset);
+
+    if (this.heartbeatCount === 0) {
+      this.log(
+        `Heartbeat gestartet — pruefe alle ${HandshakeManager.HEARTBEAT_INTERVAL_MS / 1000}s` +
+          (offset > 0 ? ` (${offset / 1000}s versetzt)` : ""),
+      );
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
   }
 
@@ -390,49 +620,14 @@ export class HandshakeManager {
   // Hilfsfunktionen
   // ============================================================================
 
-  private async completeHandshake(): Promise<void> {
-    let peerName: string | null = null;
-    if (this.peerUserId) {
-      peerName = await this.fetchUserName(this.peerUserId);
-    }
-
-    this.status = "verified";
-    this.onStatusChange({
-      status: "verified",
-      peerUserId: this.peerUserId ?? undefined,
-      peerDeviceId: this.peerDeviceId ?? undefined,
-      peerName: peerName ?? undefined,
-    });
-
-    console.log(
-      `[Handshake] ✅ Verifiziert! Peer: ${peerName ?? this.peerUserId}`,
-    );
-  }
-
-  private fail(error: string): void {
-    this.status = "failed";
-    this.onStatusChange({
-      status: "failed",
-      error,
-      peerUserId: this.peerUserId ?? undefined,
-      peerDeviceId: this.peerDeviceId ?? undefined,
-    });
-    console.error(`[Handshake] ❌ Fehlgeschlagen: ${error}`);
-  }
-
   private sendMessage(message: HandshakeMessage): void {
     if (this.dataChannel.readyState === "open") {
       this.dataChannel.send(JSON.stringify(message));
-    } else {
-      console.warn(
-        "[Handshake] DataChannel nicht offen, Nachricht konnte nicht gesendet werden",
-      );
     }
   }
 
   private sendError(error: string): void {
-    const msg: HandshakeErrorMessage = { type: "handshake-error", error };
-    this.sendMessage(msg);
+    this.sendMessage({ type: "handshake-error", error });
   }
 
   private updateStatus(status: HandshakeStatus): void {
@@ -441,19 +636,27 @@ export class HandshakeManager {
       status,
       peerUserId: this.peerUserId ?? undefined,
       peerDeviceId: this.peerDeviceId ?? undefined,
+      peerName: this.peerName ?? undefined,
+      heartbeatCount: this.heartbeatCount,
     });
   }
 
-  /** Aktuellen Status abfragen */
   getStatus(): HandshakeStatus {
     return this.status;
   }
 
-  /** Cleanup */
   destroy(): void {
+    this.stopHeartbeat();
     this.status = "idle";
     this.myChallenge = null;
     this.peerUserId = null;
     this.peerDeviceId = null;
+    this.peerName = null;
+    this.heartbeatCount = 0;
+    this.consecutiveFailures = 0;
+    this.isInitiator = false;
+    this.iVerifiedPeer = false;
+    this.peerVerifiedMe = false;
+    this.hadFailure = false;
   }
 }
