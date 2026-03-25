@@ -72,6 +72,8 @@ export default function VideoCallPage() {
   const [audioSigningActive, setAudioSigningActive] = useState(false);
   const [invalidAudioFrames, setInvalidAudioFrames] = useState(0);
   const [audioStats, setAudioStats] = useState<AudioSigningStats | null>(null);
+  const [hadAudioAttack, setHadAudioAttack] = useState(false);
+  const invalidFramesBaselineRef = useRef(0); // Baseline bei letztem Heartbeat
 
   // Security Dashboard state
   const [showSecurityPanel, setShowSecurityPanel] = useState(false);
@@ -80,7 +82,24 @@ export default function VideoCallPage() {
 
   const addSecurityLog = (message: string, type: "success" | "warning" | "error" | "info" = "info") => {
     const time = new Date().toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-    setSecurityLog((prev) => [...prev.slice(-20), { time, message, type }]);
+    setSecurityLog((prev) => [...prev.slice(-50), { time, message, type }]);
+    // Auto-scroll
+    setTimeout(() => {
+      const el = document.getElementById("security-log-container");
+      if (el) el.scrollTop = el.scrollHeight;
+    }, 50);
+  };
+
+  const handleInvalidFrames = (count: number) => {
+    // Delta seit letztem Heartbeat berechnen — nur ein Burst ist ein Angriff
+    const delta = count - invalidFramesBaselineRef.current;
+    setInvalidAudioFrames(delta);
+    if (delta >= AUDIO_ATTACK_THRESHOLD) {
+      setHadAudioAttack(true);
+    }
+    if (delta === 50) addSecurityLog("Audio-Angriff erkannt — ungueltige Pakete werden blockiert!", "error");
+    else if (delta === 200) addSecurityLog(`${delta} ungueltige Pakete — Angriff laeuft!`, "error");
+    else if (delta > 0 && delta % 500 === 0) addSecurityLog(`${delta} ungueltige Pakete blockiert`, "error");
   };
 
   // ============================================================================
@@ -123,7 +142,8 @@ export default function VideoCallPage() {
       if (!data?._id || !deviceId) return;
 
       handshakeChannelRef.current = channel;
-      addSecurityLog("Sichere Verbindung hergestellt — starte Identitaetspruefung", "info");
+      addSecurityLog("DataChannel geoeffnet — P2P-Verbindung hergestellt", "info");
+      addSecurityLog("Starte Challenge-Response Handshake...", "info");
 
       // Public Key Lookup via Convex
       const fetchPublicKey = async (
@@ -159,6 +179,10 @@ export default function VideoCallPage() {
         onStatusChange: (result: HandshakeResult) => {
           setHandshakeStatus(result.status);
 
+          if (result.status === "waiting") {
+            addSecurityLog("Challenge gesendet — warte auf signierte Antwort...", "info");
+          }
+
           if (result.status === "verified") {
             setVerifiedPeer({
               name: result.peerName,
@@ -171,29 +195,34 @@ export default function VideoCallPage() {
             }
 
             if (result.heartbeatCount === 0) {
-              addSecurityLog(`Identitaet von ${result.peerName ?? "Peer"} bestaetigt`, "success");
+              addSecurityLog(`Signatur von ${result.peerName ?? "Peer"} geprueft — Identitaet bestaetigt`, "success");
+              addSecurityLog(`Gegenseitig verifiziert mit ${result.peerName ?? "Peer"}`, "success");
             } else {
-              addSecurityLog(`Identitaet erneut bestaetigt (Pruefung #${result.heartbeatCount})`, "success");
+              addSecurityLog(`[Heartbeat #${result.heartbeatCount}] Challenge-Response erfolgreich`, "info");
+              addSecurityLog(`[Heartbeat #${result.heartbeatCount}] Signatur verifiziert — Identitaet bestaetigt`, "success");
             }
 
             // Audio-Signierung: Key an bereits eingerichtete Worker senden
             if (result.audioSigningEnabled && result.hmacKey && audioSigningRef.current) {
               if (!audioSigningRef.current.isActive()) {
-                // Erstmalig: Key senden, Worker sind schon eingerichtet
                 audioSigningRef.current.activateWithKey(result.hmacKey);
                 setAudioSigningActive(true);
-                addSecurityLog("Audio-Schutz aktiviert — alle Audiosignale werden signiert", "success");
+                addSecurityLog("HMAC-Key abgeleitet (ECDH Key-Exchange)", "info");
+                addSecurityLog("Audio-Signierung aktiviert — signiere jedes Audiopaket", "success");
               } else {
-                // Heartbeat Key-Rotation
                 audioSigningRef.current.updateKey(result.hmacKey);
-                addSecurityLog("Neuer Schluessel fuer Audio-Schutz erzeugt", "info");
+                // Baseline auf aktuellen Stand setzen — nur neue ungueltige Pakete zaehlen
+                const currentStats = audioSigningRef.current.getStats();
+                invalidFramesBaselineRef.current = currentStats.receiver.invalidFrames;
+                setInvalidAudioFrames(0);
+                addSecurityLog(`[Heartbeat #${result.heartbeatCount}] Neuer HMAC-Key abgeleitet — Audio-Key rotiert`, "info");
               }
             }
           }
 
           if (result.status === "warning") {
             setError(result.error ?? "Verifikation fehlgeschlagen — wird erneut geprüft...");
-            addSecurityLog(result.error ?? "Verifikation fehlgeschlagen — wird geprueft", "warning");
+            addSecurityLog("Signatur-Verifikation fehlgeschlagen — starte Retry...", "warning");
           }
 
           if (result.status === "failed") {
@@ -298,12 +327,7 @@ export default function VideoCallPage() {
       // AudioSigningManager frueh erstellen
       const signingManager = new AudioSigningManager(
         (stats) => setAudioStats(stats),
-        (count) => {
-          setInvalidAudioFrames(count);
-          if (count === 1) {
-            addSecurityLog("Ungueltiges Audio-Paket erkannt und blockiert!", "error");
-          }
-        }
+        handleInvalidFrames
       );
       audioSigningRef.current = signingManager;
       (window as any).__audioSigning = signingManager;
@@ -395,12 +419,7 @@ export default function VideoCallPage() {
       // AudioSigningManager frueh erstellen (noch ohne Key)
       const signingManager = new AudioSigningManager(
         (stats) => setAudioStats(stats),
-        (count) => {
-          setInvalidAudioFrames(count);
-          if (count === 1) {
-            addSecurityLog("Ungueltiges Audio-Paket erkannt und blockiert!", "error");
-          }
-        }
+        handleInvalidFrames
       );
       audioSigningRef.current = signingManager;
       (window as any).__audioSigning = signingManager;
@@ -445,6 +464,8 @@ export default function VideoCallPage() {
     setAudioSigningActive(false);
     setInvalidAudioFrames(0);
     setAudioStats(null);
+    setHadAudioAttack(false);
+    invalidFramesBaselineRef.current = 0;
 
     if (handshakeManagerRef.current) {
       handshakeManagerRef.current.destroy();
@@ -511,8 +532,40 @@ export default function VideoCallPage() {
   // Handshake Status UI Helper
   // ============================================================================
 
+  const AUDIO_ATTACK_THRESHOLD = 50; // Unter 50 = normale Key-Rotation Verluste
+
   const renderVerificationBadge = () => {
+    // Audio-Angriff hat Vorrang bei der Badge-Anzeige
+    if (invalidAudioFrames >= AUDIO_ATTACK_THRESHOLD && audioSigningActive) {
+      return (
+        <div className="flex items-center gap-2 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 animate-pulse">
+          <svg className="w-5 h-5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+          </svg>
+          <div>
+            <p className="text-sm font-medium text-red-400">Audio-Angriff erkannt</p>
+            <p className="text-xs text-red-400/70">{invalidAudioFrames} Pakete blockiert</p>
+          </div>
+        </div>
+      );
+    }
+
     if (handshakeStatus === "verified" && verifiedPeer) {
+      // Orange badge wenn es vorher einen Audio-Angriff gab
+      if (hadAudioAttack && invalidAudioFrames < AUDIO_ATTACK_THRESHOLD) {
+        return (
+          <div className="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg px-3 py-2">
+            <svg className="w-5 h-5 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <div>
+              <p className="text-sm font-medium text-yellow-500">Vorsicht</p>
+              <p className="text-xs text-yellow-500/70">Es gab einen Audio-Angriff</p>
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="flex items-center gap-2 bg-green-500/10 border border-green-500/20 rounded-lg px-3 py-2">
           <svg className="w-5 h-5 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -611,8 +664,8 @@ export default function VideoCallPage() {
                 <button
                   onClick={() => setShowSecurityPanel(!showSecurityPanel)}
                   className={`inline-flex items-center justify-center rounded-md text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-4 py-2 active:scale-[0.98] ${showSecurityPanel
-                      ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                      : "border border-input bg-background hover:bg-accent hover:text-accent-foreground"
+                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                    : "border border-input bg-background hover:bg-accent hover:text-accent-foreground"
                     }`}
                 >
                   <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -739,123 +792,212 @@ export default function VideoCallPage() {
         </div>
       )}
 
+      {/* Audio-Angriff Warnung — rot waehrend Angriff */}
+      {invalidAudioFrames >= AUDIO_ATTACK_THRESHOLD && audioSigningActive && isConnected && (
+        <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
+          <div className="bg-red-600/15 border border-red-600/30 rounded-lg p-4 flex items-center gap-3 animate-pulse">
+            <svg className="w-6 h-6 text-red-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <div>
+              <p className="text-sm text-red-400 font-semibold">Audio-Angriff erkannt — {invalidAudioFrames} ungueltige Pakete blockiert</p>
+              <p className="text-xs text-red-400/70">Eingehende Audio-Pakete haben ungueltige Signaturen. Moeglicher Man-in-the-Middle Angriff.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Nach Angriff — orange Warnung */}
+      {hadAudioAttack && invalidAudioFrames < AUDIO_ATTACK_THRESHOLD && audioSigningActive && isConnected && (
+        <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
+          <div className="bg-yellow-600/15 border border-yellow-600/30 rounded-lg p-4 flex items-center gap-3">
+            <svg className="w-6 h-6 text-yellow-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+            </svg>
+            <div>
+              <p className="text-sm text-yellow-400 font-semibold">Vorsicht — es wurde ein Audio-Angriff erkannt</p>
+              <p className="text-xs text-yellow-400/70">Die Signierung laeuft wieder, aber diese Verbindung wurde moeglicherweise kompromittiert.</p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Security Dashboard Panel */}
       {showSecurityPanel && isConnected && (
         <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
           <div className="bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm">
-            <div className="border-b border-border bg-muted/30 px-6 py-3 flex items-center justify-between">
-              <h2 className="text-sm font-semibold tracking-tight">Sicherheits-Dashboard</h2>
-              <button onClick={() => setShowSecurityPanel(false)} className="text-muted-foreground hover:text-foreground">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <div className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
+              <h2 className="text-lg font-semibold tracking-tight">Sicherheits-Dashboard</h2>
+              <button onClick={() => setShowSecurityPanel(false)} className="text-muted-foreground hover:text-foreground p-1">
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
             <div className="p-6">
-              {/* 3 Security Layers */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                {/* Layer 1: Identity */}
-                <div className={`rounded-lg p-4 border ${handshakeStatus === "verified"
-                    ? "bg-green-500/5 border-green-500/20"
-                    : handshakeStatus === "failed"
-                      ? "bg-red-500/5 border-red-500/20"
-                      : "bg-muted/30 border-border"
+              {/* 3 Security Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                {/* Identity */}
+                <div className={`rounded-xl p-5 border-2 transition-all duration-500 ${handshakeStatus === "verified"
+                  ? "bg-green-500/10 border-green-500/30"
+                  : handshakeStatus === "failed"
+                    ? "bg-red-500/10 border-red-500/30"
+                    : "bg-muted/30 border-border"
                   }`}>
-                  <div className="flex items-center gap-2 mb-2">
-                    {handshakeStatus === "verified" ? (
-                      <span className="w-2 h-2 bg-green-500 rounded-full" />
-                    ) : handshakeStatus === "failed" ? (
-                      <span className="w-2 h-2 bg-red-500 rounded-full" />
-                    ) : (
-                      <span className="w-2 h-2 bg-muted-foreground rounded-full animate-pulse" />
-                    )}
-                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Identitaet</p>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={`w-4 h-4 rounded-full transition-all duration-500 ${handshakeStatus === "verified" ? "bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.5)]" :
+                      handshakeStatus === "failed" ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)]" :
+                        "bg-muted-foreground animate-pulse"
+                      }`} />
+                    <p className="text-xl font-semibold">Identitaet</p>
                   </div>
-                  <p className="text-sm font-medium">
+                  <p className="text-base">
                     {handshakeStatus === "verified" && verifiedPeer
-                      ? verifiedPeer.name ?? "Bestaetigt"
+                      ? <span className="text-green-500 font-medium">{verifiedPeer.name ?? "Bestaetigt"}</span>
                       : handshakeStatus === "failed"
-                        ? "Nicht bestaetigt"
-                        : "Wird geprueft..."}
+                        ? <span className="text-red-400 font-medium">Nicht bestaetigt</span>
+                        : <span className="text-muted-foreground">Wird geprueft...</span>}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">
+                  <p className="text-sm text-muted-foreground mt-2">
                     {handshakeStatus === "verified"
                       ? "Digitale Signatur verifiziert"
                       : handshakeStatus === "failed"
-                        ? "Signatur ungueltig"
+                        ? "Signatur stimmt nicht ueberein"
                         : "Challenge-Response laeuft"}
                   </p>
                 </div>
 
-                {/* Layer 2: Heartbeat */}
-                <div className={`rounded-lg p-4 border ${heartbeatCount > 0 && handshakeStatus === "verified"
-                    ? "bg-green-500/5 border-green-500/20"
+                {/* Heartbeat */}
+                <div className={`rounded-xl p-5 border-2 transition-all duration-500 ${heartbeatCount > 0 && handshakeStatus === "verified"
+                  ? "bg-green-500/10 border-green-500/30"
+                  : handshakeStatus === "failed"
+                    ? "bg-red-500/10 border-red-500/30"
                     : "bg-muted/30 border-border"
                   }`}>
-                  <div className="flex items-center gap-2 mb-2">
-                    {heartbeatCount > 0 && handshakeStatus === "verified" ? (
-                      <span className="w-2 h-2 bg-green-500 rounded-full" />
-                    ) : (
-                      <span className="w-2 h-2 bg-muted-foreground rounded-full" />
-                    )}
-                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Laufende Pruefung</p>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={`w-4 h-4 rounded-full transition-all duration-500 ${heartbeatCount > 0 && handshakeStatus === "verified" ? "bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.5)]" :
+                      handshakeStatus === "failed" ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)]" :
+                        "bg-muted-foreground"
+                      }`} />
+                    <p className="text-xl font-semibold">Laufende Pruefung</p>
                   </div>
-                  <p className="text-sm font-medium">
-                    {heartbeatCount > 0 ? `${heartbeatCount}x geprueft` : "Warte auf erste Pruefung"}
+                  <p className="text-base">
+                    {heartbeatCount > 0
+                      ? <span className="text-green-500 font-medium">{heartbeatCount}x erneut geprueft</span>
+                      : <span className="text-muted-foreground">Warte auf erste Pruefung</span>}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Alle 30 Sekunden wird die Identitaet erneut verifiziert
+                  <p className="text-sm text-muted-foreground mt-2">
+                    Alle 30 Sekunden neu verifiziert
                   </p>
                 </div>
 
-                {/* Layer 3: Audio Signing */}
-                <div className={`rounded-lg p-4 border ${audioSigningActive
-                    ? "bg-green-500/5 border-green-500/20"
-                    : "bg-muted/30 border-border"
+                {/* Audio Signing — green: ok, orange: was attacked, red: under attack */}
+                <div className={`rounded-xl p-5 border-2 transition-all duration-500 ${invalidAudioFrames >= AUDIO_ATTACK_THRESHOLD
+                  ? "bg-red-500/10 border-red-500/30"
+                  : hadAudioAttack && audioSigningActive
+                    ? "bg-yellow-500/10 border-yellow-500/30"
+                    : audioSigningActive
+                      ? "bg-green-500/10 border-green-500/30"
+                      : "bg-muted/30 border-border"
                   }`}>
-                  <div className="flex items-center gap-2 mb-2">
-                    {audioSigningActive ? (
-                      <span className="w-2 h-2 bg-green-500 rounded-full" />
-                    ) : (
-                      <span className="w-2 h-2 bg-muted-foreground rounded-full" />
-                    )}
-                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Audio-Schutz</p>
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className={`w-4 h-4 rounded-full transition-all duration-500 ${invalidAudioFrames >= AUDIO_ATTACK_THRESHOLD ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)] animate-pulse" :
+                      hadAudioAttack && audioSigningActive ? "bg-yellow-500 shadow-[0_0_12px_rgba(234,179,8,0.5)]" :
+                        audioSigningActive ? "bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.5)]" :
+                          "bg-muted-foreground"
+                      }`} />
+                    <p className="text-xl font-semibold">Audio-Schutz</p>
                   </div>
-                  <p className="text-sm font-medium">
-                    {audioSigningActive ? "Aktiv" : "Nicht verfuegbar"}
+                  <p className="text-base">
+                    {invalidAudioFrames >= AUDIO_ATTACK_THRESHOLD
+                      ? <span className="text-red-400 font-medium">{invalidAudioFrames} Pakete blockiert!</span>
+                      : hadAudioAttack && audioSigningActive
+                        ? <span className="text-yellow-400 font-medium">Vorsicht — es gab einen Angriff</span>
+                        : audioSigningActive
+                          ? <span className="text-green-500 font-medium">Aktiv</span>
+                          : <span className="text-muted-foreground">Nicht verfuegbar</span>}
                   </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {audioSigningActive
-                      ? "Jedes Audiopaket wird digital signiert"
-                      : "Browser unterstuetzt kein Audio-Signing"}
+                  <p className="text-sm text-muted-foreground mt-2">
+                    {audioSigningActive && audioStats
+                      ? `${audioStats.receiver.validFrames} Pakete verifiziert${audioStats.receiver.invalidFrames > 0 ? `, ${audioStats.receiver.invalidFrames} blockiert` : ""}`
+                      : audioSigningActive
+                        ? "Jedes Audiopaket wird signiert"
+                        : "Browser unterstuetzt kein Audio-Signing"}
                   </p>
                 </div>
               </div>
 
-              {/* Security Log */}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-2">Sicherheits-Protokoll</p>
-                <div className="bg-background/50 rounded-lg border border-border p-3 max-h-48 overflow-y-auto">
-                  {securityLog.length === 0 ? (
-                    <p className="text-xs text-muted-foreground text-center py-2">Noch keine Ereignisse</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {securityLog.map((entry, i) => (
-                        <div key={i} className="flex items-start gap-2 text-xs">
-                          <span className="text-muted-foreground font-mono whitespace-nowrap">{entry.time}</span>
-                          <span className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${entry.type === "success" ? "bg-green-500" :
+              {/* Log + Angriff simulieren */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                {/* Security Log — breit */}
+                <div className="md:col-span-2">
+                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Sicherheits-Protokoll</p>
+                  <div className="bg-background/50 rounded-lg border border-border p-3 max-h-56 overflow-y-auto font-mono" id="security-log-container">
+                    {securityLog.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-4">Warte auf Verbindung...</p>
+                    ) : (
+                      <div className="space-y-0.5">
+                        {securityLog.map((entry, i) => (
+                          <div key={i} className="flex items-start gap-2 text-xs leading-relaxed">
+                            <span className="text-muted-foreground whitespace-nowrap">{entry.time}</span>
+                            <span className={`w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 ${entry.type === "success" ? "bg-green-500" :
                               entry.type === "warning" ? "bg-yellow-500" :
                                 entry.type === "error" ? "bg-red-500" :
                                   "bg-blue-400"
-                            }`} />
-                          <span className={
-                            entry.type === "error" ? "text-red-400" :
-                              entry.type === "warning" ? "text-yellow-400" :
-                                "text-foreground"
-                          }>{entry.message}</span>
-                        </div>
-                      ))}
+                              }`} />
+                            <span className={
+                              entry.type === "error" ? "text-red-400" :
+                                entry.type === "warning" ? "text-yellow-400" :
+                                  entry.type === "success" ? "text-green-400" :
+                                    "text-muted-foreground"
+                            }>{entry.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Angriff simulieren */}
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Angriff simulieren</p>
+                  {audioSigningActive ? (
+                    <div className="space-y-3">
+                      <button
+                        onClick={() => {
+                          if (audioSigningRef.current) {
+                            audioSigningRef.current.pauseSigning();
+                            addSecurityLog("Audio-Signierung gestoppt — sende unsignierte Pakete", "warning");
+                          }
+                        }}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium h-11 px-4 bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-all active:scale-[0.98]"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                        </svg>
+                        Signierung stoppen
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (audioSigningRef.current) {
+                            audioSigningRef.current.resumeSigning();
+                            setInvalidAudioFrames(0);
+                            addSecurityLog("Audio-Signierung wieder aktiviert — Vorsicht: es gab einen Angriff!", "warning");
+                          }
+                        }}
+                        className="w-full inline-flex items-center justify-center gap-2 rounded-lg text-sm font-medium h-11 px-4 bg-green-500/10 border border-green-500/30 text-green-500 hover:bg-green-500/20 transition-all active:scale-[0.98]"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                        </svg>
+                        Signierung starten
+                      </button>
+                      <p className="text-xs text-muted-foreground">
+                        Stoppt die Signierung auf dieser Seite. Die Gegenseite erkennt unsignierte Pakete und blockiert sie.
+                      </p>
                     </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground py-4">Audio-Signierung nicht aktiv</p>
                   )}
                 </div>
               </div>
@@ -892,12 +1034,12 @@ export default function VideoCallPage() {
 
           {/* Remote video */}
           <div className={`relative bg-card rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm transition-all duration-500 hover:shadow-[0_20px_70px_-15px_rgba(0,0,0,0.3)] border-2 ${handshakeStatus === "failed"
-              ? "border-red-500/60"
-              : handshakeStatus === "warning"
-                ? "border-red-400/40 animate-pulse"
-                : handshakeStatus === "verified"
-                  ? "border-green-500/30"
-                  : "border-border"
+            ? "border-red-500/60"
+            : handshakeStatus === "warning"
+              ? "border-red-400/40 animate-pulse"
+              : handshakeStatus === "verified"
+                ? "border-green-500/30"
+                : "border-border"
             }`}>
             {/* Remote Peer Label mit Verifikations-Status */}
             <div className="absolute top-4 left-4 z-10 flex items-center gap-2">

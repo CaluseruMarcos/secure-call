@@ -50,7 +50,7 @@ function setupMessagePort(port) {
       hmacKey = key;
       counter = 0;
       lastReceivedCounter = 0;
-      invalidFrames = 0;
+      // invalidFrames wird NICHT zurueckgesetzt — laeuft weiter bei Angriff
       console.log("[AudioWorker] HMAC-Key rotiert (Heartbeat), Counter zurueckgesetzt");
     }
 
@@ -70,10 +70,10 @@ function setupMessagePort(port) {
     }
   };
 
-  // Stats alle 5 Sekunden automatisch senden
+  // Stats alle 2 Sekunden automatisch senden
   statsInterval = setInterval(() => {
     sendStats();
-  }, 5000);
+  }, 2000);
 }
 
 function sendStats() {

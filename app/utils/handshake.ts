@@ -109,6 +109,7 @@ export class HandshakeManager {
 
   // Heartbeat
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimeout: ReturnType<typeof setTimeout> | null = null;
   private heartbeatCount: number = 0;
   private static HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -269,6 +270,15 @@ export class HandshakeManager {
       this.peerUserId = msg.userId;
       this.peerDeviceId = msg.deviceId;
       this.peerSupportsAudioSigning = msg.supportsAudioSigning ?? false;
+
+      // Wenn wir schon mal verifiziert waren, ist das ein Heartbeat vom Peer
+      if (
+        this.status === "verified" ||
+        this.status === "warning" ||
+        this.status === "failed"
+      ) {
+        this.heartbeatCount++;
+      }
 
       this.log(
         `Challenge von Peer (${msg.userId.slice(0, 8)}...) empfangen (Audio-Signing: ${this.peerSupportsAudioSigning ? "ja" : "nein"})`,
@@ -664,7 +674,7 @@ export class HandshakeManager {
 
     const offset = this.isInitiator ? 0 : 5_000;
 
-    setTimeout(() => {
+    this.heartbeatTimeout = setTimeout(() => {
       this.heartbeatInterval = setInterval(async () => {
         if (this.dataChannel.readyState !== "open") {
           this.log("DataChannel geschlossen — stoppe Heartbeat");
@@ -700,6 +710,10 @@ export class HandshakeManager {
   }
 
   private stopHeartbeat(): void {
+    if (this.heartbeatTimeout) {
+      clearTimeout(this.heartbeatTimeout);
+      this.heartbeatTimeout = null;
+    }
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
