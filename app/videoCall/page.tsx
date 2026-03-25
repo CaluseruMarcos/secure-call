@@ -671,7 +671,7 @@ export default function VideoCallPage() {
                   <svg className="w-4 h-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                   </svg>
-                  Sicherheit
+                  Dashboard
                 </button>
               )}
 
@@ -827,7 +827,7 @@ export default function VideoCallPage() {
         <div className="relative z-10 max-w-7xl mx-auto w-full mb-4">
           <div className="bg-card border border-border rounded-lg shadow-2xl overflow-hidden backdrop-blur-sm">
             <div className="border-b border-border bg-muted/30 px-6 py-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold tracking-tight">Sicherheits-Dashboard</h2>
+              <h2 className="text-lg font-semibold tracking-tight">Dashboard</h2>
               <button onClick={() => setShowSecurityPanel(false)} className="text-muted-foreground hover:text-foreground p-1">
                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -849,7 +849,7 @@ export default function VideoCallPage() {
                       handshakeStatus === "failed" ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)]" :
                         "bg-muted-foreground animate-pulse"
                       }`} />
-                    <p className="text-xl font-semibold">Identitaet</p>
+                    <p className="text-xl font-semibold">Handshake</p>
                   </div>
                   <p className="text-base">
                     {handshakeStatus === "verified" && verifiedPeer
@@ -879,7 +879,7 @@ export default function VideoCallPage() {
                       handshakeStatus === "failed" ? "bg-red-500 shadow-[0_0_12px_rgba(239,68,68,0.5)]" :
                         "bg-muted-foreground"
                       }`} />
-                    <p className="text-xl font-semibold">Laufende Pruefung</p>
+                    <p className="text-xl font-semibold">Heartbeat</p>
                   </div>
                   <p className="text-base">
                     {heartbeatCount > 0
@@ -931,7 +931,7 @@ export default function VideoCallPage() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 {/* Security Log — breit */}
                 <div className="md:col-span-2">
-                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Sicherheits-Protokoll</p>
+                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Console</p>
                   <div className="bg-background/50 rounded-lg border border-border p-3 max-h-56 overflow-y-auto font-mono" id="security-log-container">
                     {securityLog.length === 0 ? (
                       <p className="text-sm text-muted-foreground text-center py-4">Warte auf Verbindung...</p>
@@ -960,7 +960,7 @@ export default function VideoCallPage() {
 
                 {/* Angriff simulieren */}
                 <div>
-                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Angriff simulieren</p>
+                  <p className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-3">Audio Angriff</p>
                   {audioSigningActive ? (
                     <div className="space-y-3">
                       <button
@@ -1161,7 +1161,7 @@ export default function VideoCallPage() {
 
       {/* Footer note */}
       <p className="relative z-10 text-center text-xs text-muted-foreground mt-6 animate-pulse" style={{ animationDuration: "3s" }}>
-        End-to-end verified communication with ECDSA P-256
+        End-to-end verified communication
       </p>
     </div>
   );
