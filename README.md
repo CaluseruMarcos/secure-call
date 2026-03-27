@@ -196,6 +196,9 @@ npm run dev-https
 
 These functions are for local security testing workflows.
 
+## Local Deployment
+You can also deploy with convex locally, just use the documentation: https://github.com/get-convex/convex-backend/blob/main/self-hosted/README.md
+
 ## License
 
 ISC (see LICENSE).
